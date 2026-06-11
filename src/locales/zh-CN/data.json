@@ -460,6 +460,7 @@
     "resolve_partial": "部分冲突未能解决",
     "resolve_failed": "解决冲突失败",
     "sync_success": "同步完成",
+    "sync_partial": "同步部分完成（有警告）",
     "sync_failed": "同步失败",
     "sync_status": "同步状态",
     "all_synced": "所有数据已同步",

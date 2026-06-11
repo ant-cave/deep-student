@@ -199,6 +199,7 @@ export const SyncSettingsSection: React.FC<SyncSettingsSectionProps> = ({
 
       const cloudConfig = await loadStoredCloudStorageConfigWithCredentials();
       if (!cloudConfig) {
+        console.warn('[CloudSync] 用户触发同步但未配置云存储');
         showGlobalNotification(
           'warning',
           t('data:governance.cloud_sync_not_configured')
@@ -206,6 +207,7 @@ export const SyncSettingsSection: React.FC<SyncSettingsSectionProps> = ({
         return;
       }
 
+      console.info('[CloudSync] 用户触发同步: direction=%s, provider=%s', direction, cloudConfig.provider);
       setIsSyncing(true);
       setSyncProgress({
         phase: 'preparing',
@@ -218,40 +220,36 @@ export const SyncSettingsSection: React.FC<SyncSettingsSectionProps> = ({
         error: null,
       });
 
-      // 设置进度监听
+      // 设置进度监听（仅负责实时进度显示，完成/失败由 try/catch 统一处理）
       const unlisten = await listenSyncProgress({
         onProgress: (progress) => setSyncProgress(progress),
-        onComplete: () => {
-          setSyncProgress(null);
-          setIsSyncing(false);
-          showGlobalNotification(
-            'success',
-            t('data:sync_settings.sync_success')
-          );
-          // 刷新同步状态
-          void getSyncStatus().catch(console.error);
-        },
-        onError: (error) => {
-          setSyncProgress(null);
-          setIsSyncing(false);
-          showGlobalNotification(
-            'error',
-            `${t('data:sync_settings.sync_failed')}: ${error}`
-          );
-        },
       });
 
       try {
         // TODO: 从配置中获取 cloudConfig 和 strategy
-        await runSyncWithProgress(direction, cloudConfig, 'keep_latest');
+        const result = await runSyncWithProgress(direction, cloudConfig, 'keep_latest');
+
+        if (result.success) {
+          showGlobalNotification(
+            'success',
+            t('data:sync_settings.sync_success')
+          );
+        } else {
+          showGlobalNotification(
+            'warning',
+            result.error_message ?? t('data:sync_settings.sync_partial')
+          );
+        }
+        // 刷新同步状态
+        void getSyncStatus().catch(console.error);
       } catch (err: unknown) {
-        setSyncProgress(null);
-        setIsSyncing(false);
         showGlobalNotification(
           'error',
           `${t('data:sync_settings.sync_failed')}: ${getErrorMessage(err)}`
         );
       } finally {
+        setSyncProgress(null);
+        setIsSyncing(false);
         unlisten();
       }
     },

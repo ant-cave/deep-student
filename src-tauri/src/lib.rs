@@ -10,6 +10,7 @@ pub mod apkg_exporter_service;
 #[allow(dead_code)]
 pub mod backup_job_manager;
 pub mod batch_operations;
+pub mod canonical_tools;
 pub mod cmd;
 #[allow(dead_code)]
 pub mod commands;
@@ -133,7 +134,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog;
 use tauri_plugin_fs;
 use tauri_plugin_http;
-use tauri_plugin_log::{Target, TargetKind};
+use tauri_plugin_log::{Target, TargetKind, RotationStrategy};
+use tauri_plugin_log::fern::FormatCallback;
 use tauri_plugin_opener;
 // Sentry for Rust (后端)
 use sentry::ClientInitGuard;
@@ -182,6 +184,71 @@ fn prepare_linux_appimage_runtime_env() {
     // Reduce known WebKit/GPU instability on some Linux desktop stacks.
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
+/// 生成日志格式化函数。
+///
+/// - `use_colors = true`：带 ANSI 颜色（Webview 控制台）
+/// - `use_colors = false`：纯文本格式（文件/终端）
+fn make_log_formatter(
+    use_colors: bool,
+) -> impl Fn(FormatCallback, &std::fmt::Arguments, &log::Record) + Send + Sync + 'static {
+    move |out, message, record| {
+        let now = chrono::Local::now();
+        let date_str = now.format("%Y-%m-%d").to_string();
+        let time_str = now.format("%H:%M:%S%.3f").to_string();
+        let level = record.level();
+        let target = record.target().to_string();
+        let location = if let Some(file) = record.file() {
+            let file_name = file.split('/').last().unwrap_or(file);
+            if let Some(line) = record.line() {
+                format!("{}:{}", file_name, line)
+            } else {
+                file_name.to_string()
+            }
+        } else {
+            "unknown".to_string()
+        };
+        if use_colors {
+            let level_color = match level {
+                log::Level::Error => "\x1b[31m", // red
+                log::Level::Warn => "\x1b[33m",  // yellow
+                log::Level::Info => "\x1b[32m",  // green
+                log::Level::Debug => "\x1b[36m", // cyan
+                log::Level::Trace => "\x1b[37m", // white
+            };
+            let reset = "\x1b[0m";
+            out.finish(format_args!(
+                "{}[{}]{} {}[{}]{} {}{}[{}]{} {}[{}]{} {}{}[{}]{} {}[{}]{} {}",
+                "\x1b[90m",
+                date_str,
+                reset,
+                "\x1b[90m",
+                time_str,
+                reset,
+                level_color,
+                target,
+                reset,
+                "\x1b[90m",
+                location,
+                reset,
+                level_color,
+                level,
+                reset,
+                message
+            ))
+        } else {
+            out.finish(format_args!(
+                "[{}][{}][{}][{}][{}] {}",
+                date_str,
+                time_str,
+                target,
+                location,
+                level,
+                message
+            ))
+        }
     }
 }
 
@@ -261,14 +328,17 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .clear_targets()
-                // 写入各平台推荐日志目录（记录所有级别）
-                .target(Target::new(TargetKind::LogDir {
-                    file_name: Some("deep-student".to_string()),
-                }))
-                // 开发期输出到终端（过滤掉 TRACE 和 DEBUG）
-                .target(Target::new(TargetKind::Stdout))
-                // 开发期输出到浏览器控制台（过滤掉 TRACE 和 DEBUG）
-                .target(Target::new(TargetKind::Webview))
+                // 写入各平台推荐日志目录（记录所有级别，纯文本格式）
+                .target(
+                    Target::new(TargetKind::LogDir {
+                        file_name: Some("deep-student".to_string()),
+                    })
+                    .format(make_log_formatter(false)),
+                )
+                // 开发期输出到终端（纯文本格式）
+                .target(Target::new(TargetKind::Stdout).format(make_log_formatter(false)))
+                // 开发期输出到浏览器控制台（ANSI 颜色格式）
+                .target(Target::new(TargetKind::Webview).format(make_log_formatter(true)))
                 // 设置全局日志级别为 INFO，屏蔽掉 DEBUG 和 TRACE
                 .level(log::LevelFilter::Info)
                 // 特别屏蔽一些第三方库的日志
@@ -282,6 +352,9 @@ pub fn run() {
                 .level_for("reqwest", log::LevelFilter::Warn)
                 // 我们自己的模块保持 INFO 级别
                 .level_for("deep_student_lib", log::LevelFilter::Info)
+                // 日志文件轮转策略：每天轮转，保留 7 天
+                .rotation_strategy(RotationStrategy::KeepAll)
+                .max_file_size(10 * 1024 * 1024) // 10MB
                 .build(),
         )
         //.manage(init_app_state())

@@ -164,11 +164,11 @@ export const CloudStorageSection: React.FC<CloudStorageSectionProps> = ({
           if (config.root) setRoot(config.root);
           configLoaded = true;
         } catch (e: unknown) {
-          console.error('Failed to load cloud storage config:', e);
+          console.error('[CloudSync] 加载云存储配置失败:', e);
         }
       } else if (legacy) {
         // 从旧配置迁移
-        console.log('Migrating from legacy cloud storage config...');
+        console.info('[CloudSync] 正在迁移旧版云存储配置...');
         try {
           const oldConfig: cloudApi.CloudStorageConfig = JSON.parse(legacy);
           setProvider(oldConfig.provider);
@@ -204,10 +204,10 @@ export const CloudStorageSection: React.FC<CloudStorageSectionProps> = ({
           
           // 删除旧配置
           localStorage.removeItem(LEGACY_CONFIG_KEY);
-          console.log('Cloud storage config migration completed');
+          console.info('[CloudSync] 云存储配置迁移完成');
           configLoaded = true;
         } catch (e: unknown) {
-          console.error('Failed to migrate legacy config:', e);
+          console.error('[CloudSync] 迁移旧版配置失败:', e);
         }
       }
       
@@ -229,7 +229,7 @@ export const CloudStorageSection: React.FC<CloudStorageSectionProps> = ({
           }
         }
       } catch (e: unknown) {
-        console.warn('Failed to load credentials from secure storage:', e);
+        console.warn('[CloudSync] 从安全存储加载凭据失败:', e);
       }
     };
     
@@ -278,7 +278,7 @@ export const CloudStorageSection: React.FC<CloudStorageSectionProps> = ({
       });
       showGlobalNotification('success', t('cloudStorage:messages.configSaved'));
     } catch (e: unknown) {
-      console.error('Failed to save credentials to secure storage:', e);
+      console.error('[CloudSync] 保存凭据到安全存储失败:', e);
       showGlobalNotification('warning', t('cloudStorage:messages.configSavedButCredentialsFailed'));
     }
     onConfigChanged?.();
@@ -292,7 +292,7 @@ export const CloudStorageSection: React.FC<CloudStorageSectionProps> = ({
     try {
       await cloudApi.deleteCredentials();
     } catch (e: unknown) {
-      console.warn('Failed to delete credentials from secure storage:', e);
+      console.warn('[CloudSync] 从安全存储删除凭据失败:', e);
     }
     // 重置状态
     setOpProgress(null);
@@ -343,7 +343,7 @@ export const CloudStorageSection: React.FC<CloudStorageSectionProps> = ({
       const versionList = await cloudApi.listVersions(config);
       setVersions(versionList);
     } catch (e: unknown) {
-      console.error('Failed to refresh status:', e);
+      console.error('[CloudSync] 刷新状态失败:', e);
     }
   }, [buildConfig, connectionStatus]);
 

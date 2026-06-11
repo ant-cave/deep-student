@@ -61,6 +61,13 @@ impl WebDavStorage {
             .build()
             .map_err(|e| AppError::internal(format!("构建 HTTP 客户端失败: {e}")))?;
 
+        tracing::info!(
+            "[WebDAV] 初始化客户端: endpoint={}, username={}, root={}",
+            config.endpoint,
+            config.username,
+            root.trim_matches('/')
+        );
+
         Ok(Self {
             base_url: url,
             username: config.username,
@@ -170,7 +177,7 @@ impl WebDavStorage {
             if attempt > 0 {
                 let delay = std::time::Duration::from_millis(500 * (1 << attempt));
                 tokio::time::sleep(delay).await;
-                tracing::debug!("WebDAV {} 重试 {}/{}", method, attempt + 1, max_retries);
+                tracing::debug!("[WebDAV] {} 重试 {}/{}", method, attempt + 1, max_retries);
             }
 
             let builder = self
@@ -233,16 +240,23 @@ impl WebDavStorage {
                 .request_with_path(Self::mkcol_method()?, &format!("{}/", current), None)
                 .await?;
 
+            let status = res.status();
             // 405 METHOD_NOT_ALLOWED 或 409 CONFLICT 表示目录已存在，可以忽略
-            if !matches!(
-                res.status(),
+            if matches!(
+                status,
                 StatusCode::OK
                     | StatusCode::CREATED
                     | StatusCode::METHOD_NOT_ALLOWED
                     | StatusCode::CONFLICT
             ) {
-                // 不是致命错误，目录可能已存在
-                tracing::debug!("WebDAV MKCOL {} 返回 {}", current, res.status());
+                // 目录创建成功或已存在
+                tracing::debug!("WebDAV MKCOL {} 返回 {} (成功或已存在)", current, status);
+            } else {
+                // 其他状态码（403/500/503 等）是真正需要阻断的错误
+                return Err(AppError::network(format!(
+                    "WebDAV 创建目录失败 ({}): HTTP {}",
+                    current, status
+                )));
             }
         }
         Ok(())
@@ -253,7 +267,7 @@ impl WebDavStorage {
         let doc = match roxmltree::Document::parse(xml) {
             Ok(d) => d,
             Err(e) => {
-                tracing::warn!("WebDAV PROPFIND XML 解析失败: {e}");
+                tracing::warn!("[WebDAV] PROPFIND XML 解析失败: {e}");
                 return Vec::new();
             }
         };
@@ -341,7 +355,7 @@ impl WebDavStorage {
         let doc = match roxmltree::Document::parse(xml) {
             Ok(d) => d,
             Err(e) => {
-                tracing::warn!("WebDAV PROPFIND XML 解析失败: {e}");
+                tracing::warn!("[WebDAV] PROPFIND XML 解析失败: {e}");
                 return (Vec::new(), Vec::new());
             }
         };
@@ -419,14 +433,21 @@ impl CloudStorage for WebDavStorage {
     }
 
     async fn check_connection(&self) -> Result<()> {
+        tracing::info!("[WebDAV] 连接检查: endpoint={}", self.base_url);
         // 先确保同步根目录存在，再做连接探测
         self.ensure_directory(&self.root).await?;
 
         // 回退：GET 根目录
         let res = self.request(Method::GET, "", None).await?;
         if res.status().is_success() || res.status() == StatusCode::NOT_FOUND {
+            tracing::info!("[WebDAV] 连接检查成功: endpoint={}", self.base_url);
             Ok(())
         } else {
+            tracing::error!(
+                "[WebDAV] 连接检查失败: endpoint={}, status={}",
+                self.base_url,
+                res.status()
+            );
             Err(AppError::network(format!(
                 "WebDAV 连接检测失败: {} {}",
                 res.status(),
@@ -441,6 +462,11 @@ impl CloudStorage for WebDavStorage {
         local_path: &Path,
         progress: Option<UploadProgressCallback>,
     ) -> Result<String> {
+        let metadata = std::fs::metadata(local_path)
+            .map_err(|e| AppError::file_system(format!("读取文件元信息失败: {e}")))?;
+        let file_size = metadata.len();
+        tracing::info!("[WebDAV] put_file: key={}, size={}", key, file_size);
+
         self.ensure_directory(&self.root).await?;
         // 确保父目录存在
         if let Some(parent) = key.rfind('/') {
@@ -497,8 +523,19 @@ impl CloudStorage for WebDavStorage {
             if let Some(cb) = progress.as_ref() {
                 cb(file_size, file_size);
             }
+            tracing::info!(
+                "[WebDAV] put_file 成功: key={}, size={}, checksum={}",
+                key,
+                file_size,
+                checksum
+            );
             Ok(checksum)
         } else {
+            tracing::error!(
+                "[WebDAV] put_file 失败: key={}, status={}",
+                key,
+                res.status()
+            );
             Err(AppError::network(format!(
                 "WebDAV 上传失败: {} {}",
                 res.status(),
@@ -586,6 +623,7 @@ impl CloudStorage for WebDavStorage {
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        tracing::info!("[WebDAV] 上传: key={}, size={}", key, data.len());
         self.ensure_directory(&self.root).await?;
         // 确保父目录存在
         if let Some(parent) = key.rfind('/') {
@@ -599,8 +637,14 @@ impl CloudStorage for WebDavStorage {
         let res = self.request(Method::PUT, key, Some(data.to_vec())).await?;
 
         if res.status().is_success() {
+            tracing::info!("[WebDAV] 上传成功: key={}, size={}", key, data.len());
             Ok(())
         } else {
+            tracing::error!(
+                "[WebDAV] 上传失败: key={}, status={}",
+                key,
+                res.status()
+            );
             Err(AppError::network(format!(
                 "WebDAV 上传失败: {} {}",
                 res.status(),
@@ -610,12 +654,19 @@ impl CloudStorage for WebDavStorage {
     }
 
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        tracing::info!("[WebDAV] 下载: key={}", key);
         let res = self.request(Method::GET, key, None).await?;
 
         if res.status() == StatusCode::NOT_FOUND {
+            tracing::info!("[WebDAV] 下载不存在: key={}", key);
             return Ok(None);
         }
         if !res.status().is_success() {
+            tracing::error!(
+                "[WebDAV] 下载失败: key={}, status={}",
+                key,
+                res.status()
+            );
             return Err(AppError::network(format!(
                 "WebDAV 下载失败: {} {}",
                 res.status(),
@@ -627,10 +678,12 @@ impl CloudStorage for WebDavStorage {
             .bytes()
             .await
             .map_err(|e| AppError::network(format!("读取响应体失败: {e}")))?;
+        tracing::info!("[WebDAV] 下载成功: key={}, size={}", key, bytes.len());
         Ok(Some(bytes.to_vec()))
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<FileInfo>> {
+        tracing::info!("[WebDAV] 列举: prefix={}", prefix);
         let start_path = if prefix.is_empty() {
             String::new()
         } else {
@@ -711,15 +764,23 @@ impl CloudStorage for WebDavStorage {
         }
 
         all_files.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+        tracing::info!("[WebDAV] 列举完成: prefix={}, count={}", prefix, all_files.len());
         Ok(all_files)
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
+        tracing::info!("[WebDAV] 删除: key={}", key);
         let res = self.request(Method::DELETE, key, None).await?;
 
         if res.status().is_success() || res.status() == StatusCode::NOT_FOUND {
+            tracing::info!("[WebDAV] 删除成功: key={}", key);
             Ok(())
         } else {
+            tracing::error!(
+                "[WebDAV] 删除失败: key={}, status={}",
+                key,
+                res.status()
+            );
             Err(AppError::network(format!(
                 "WebDAV 删除失败: {} {}",
                 res.status(),

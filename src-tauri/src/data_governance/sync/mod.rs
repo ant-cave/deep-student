@@ -1096,15 +1096,18 @@ impl SyncManager {
     /// # 参数
     /// * `storage` - 云存储实例
     /// * `changes` - 带完整数据的变更列表
+    /// 上传带完整数据的变更到云存储。
+    ///
+    /// 成功时返回云端 key，供调用方在批量上传失败时回滚（删除已上传的残留数据）。
     pub async fn upload_enriched_changes(
         &self,
         storage: &dyn CloudStorage,
         changes: &[SyncChangeWithData],
         progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
-    ) -> Result<(), SyncError> {
+    ) -> Result<String, SyncError> {
         if changes.is_empty() {
             tracing::debug!("[sync] 没有变更需要上传");
-            return Ok(());
+            return Ok(String::new());
         }
 
         // 版本使用秒级时间戳，与 legacy 文件同一版本空间
@@ -1173,7 +1176,7 @@ impl SyncManager {
             self.encryption_enabled()
         );
 
-        Ok(())
+        Ok(key)
     }
 
     /// 下载变更数据（支持新旧两种格式）
@@ -1386,19 +1389,26 @@ impl SyncManager {
             .and_then(|version_str| version_str.parse().ok())
     }
 
+    /// 对下载的变更去重，保留每个 key 的**最新**版本（最后出现的）。
+    ///
+    /// 因为 `changes` 已按版本升序排列，同一记录被多次修改时，
+    /// 保留最后一次出现可以拿到最新的数据。
     fn dedupe_downloaded_changes(
         changes: Vec<(u64, SyncChangeWithData)>,
     ) -> Vec<(u64, SyncChangeWithData)> {
         let mut seen = HashSet::new();
         let mut deduped = Vec::with_capacity(changes.len());
 
-        for (version, change) in changes {
+        // 逆序遍历：后出现的（更高版本的）先被加入 seen，前序的重复项被跳过
+        for (version, change) in changes.into_iter().rev() {
             let key = Self::download_change_dedupe_key(&change);
             if seen.insert(key) {
                 deduped.push((version, change));
             }
         }
 
+        // 恢复原始顺序（升序）
+        deduped.reverse();
         deduped
     }
 

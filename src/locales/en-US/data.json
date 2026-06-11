@@ -460,6 +460,7 @@
     "resolve_partial": "Some conflicts could not be resolved",
     "resolve_failed": "Failed to resolve conflicts",
     "sync_success": "Sync completed",
+    "sync_partial": "Sync completed with warnings",
     "sync_failed": "Sync failed",
     "sync_status": "Sync Status",
     "all_synced": "All data is synced",

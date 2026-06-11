@@ -175,7 +175,7 @@ impl SyncProgressEmitter {
         if let Err(e) = self.app.emit(EVENT_NAME, progress) {
             tracing::error!("[sync_emitter] 发送进度事件失败: {}", e);
         } else {
-            tracing::trace!(
+            tracing::debug!(
                 "[sync_emitter] 进度事件: phase={:?}, percent={:.1}%, current={}/{}",
                 progress.phase,
                 progress.percent,

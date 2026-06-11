@@ -238,7 +238,7 @@ async fn drain_blob_deletion_queue(
 pub async fn data_governance_get_sync_status(
     app: tauri::AppHandle,
 ) -> Result<SyncStatusResponse, String> {
-    debug!("[data_governance] 获取同步状态");
+    info!("[data_governance] 查询本地同步状态");
 
     // P0-6: 维护模式检查——禁止在备份/恢复/迁移期间访问数据库文件
     check_maintenance_mode(&app)?;
@@ -329,6 +329,13 @@ pub async fn data_governance_get_sync_status(
         total_pending_changes,
         total_synced_changes,
         databases_status.len()
+    );
+
+    info!(
+        "[data_governance] 同步状态查询完成: db_count={}, total_pending={}, total_synced={}",
+        databases_status.len(),
+        total_pending_changes,
+        total_synced_changes
     );
 
     Ok(SyncStatusResponse {
@@ -2095,12 +2102,24 @@ pub async fn data_governance_run_sync_with_progress(
 
     match result {
         Ok((exec_result, skipped)) => {
-            // 发送完成状态
-            emitter.emit_completed().await;
+            // 根据实际成功状态发送对应事件，避免"部分失败"被前端误报为成功
+            if exec_result.success {
+                emitter.emit_completed().await;
+            } else {
+                emitter
+                    .emit_failed(
+                        exec_result
+                            .error_message
+                            .as_deref()
+                            .unwrap_or("同步部分失败"),
+                    )
+                    .await;
+            }
 
             info!(
-                "[data_governance] 带进度同步完成: direction={}, uploaded={}, downloaded={}, conflicts={}, skipped={}, duration={}ms",
+                "[data_governance] 带进度同步完成: direction={}, success={}, uploaded={}, downloaded={}, conflicts={}, skipped={}, duration={}ms",
                 exec_result.direction.as_str(),
+                exec_result.success,
                 exec_result.changes_uploaded,
                 exec_result.changes_downloaded,
                 exec_result.conflicts_detected,
@@ -2163,6 +2182,7 @@ pub async fn data_governance_run_sync_with_progress(
             })
         }
         Err(e) => {
+            // 返回 Err 让 Tauri 正确传播错误，前端 catch 块可以标准处理
             emitter.emit_failed(&e).await;
             error!("[data_governance] 带进度同步失败: {}", e);
             #[cfg(feature = "data_governance")]
@@ -2190,17 +2210,7 @@ pub async fn data_governance_run_sync_with_progress(
                     })),
                 );
             }
-            Ok(SyncExecutionResponse {
-                success: false,
-                direction: sync_direction.as_str().to_string(),
-                changes_uploaded: 0,
-                changes_downloaded: 0,
-                conflicts_detected: 0,
-                duration_ms,
-                device_id,
-                error_message: Some(e),
-                skipped_changes: 0,
-            })
+            Err(e)
         }
     }
 }
@@ -2242,6 +2252,9 @@ async fn execute_upload_with_progress_v2(
         let batches: Vec<&[SyncChangeWithData]> = enriched.chunks(BATCH_SIZE).collect();
         let batch_count = batches.len();
 
+        // 跟踪已上传的 batch key，用于在后续 batch 失败时回滚（删除残留数据）
+        let mut uploaded_keys: Vec<String> = Vec::with_capacity(batch_count);
+
         for (batch_idx, batch) in batches.iter().enumerate() {
             let batch_progress_base =
                 10.0_f32 + (batch_idx as f32 / batch_count.max(1) as f32) * 40.0;
@@ -2281,17 +2294,41 @@ async fn execute_upload_with_progress_v2(
                     });
                 });
 
-            manager
+            let uploaded_key = match manager
                 .upload_enriched_changes(storage, batch, Some(byte_progress_cb))
                 .await
-                .map_err(|e| {
-                    format!(
+            {
+                Ok(key) => key,
+                Err(e) => {
+                    let error_msg = format!(
                         "上传同步失败（批次 {}/{}）: {}",
                         batch_idx + 1,
                         batch_count,
                         e
-                    )
-                })?;
+                    );
+                    // 回滚：删除前序批次已上传的残留数据，避免云上出现无 manifest 引用的孤儿文件
+                    if !uploaded_keys.is_empty() {
+                        tracing::warn!(
+                            "[data_governance] 批次上传失败，回滚删除已上传的 {} 个批次数据",
+                            uploaded_keys.len()
+                        );
+                        for key in &uploaded_keys {
+                            if let Err(del_err) = storage.delete(key).await {
+                                tracing::error!(
+                                    "[data_governance] 回滚删除失败 (key={}): {}",
+                                    key,
+                                    del_err
+                                );
+                            }
+                        }
+                    }
+                    return Err(error_msg);
+                }
+            };
+
+            if !uploaded_key.is_empty() {
+                uploaded_keys.push(uploaded_key);
+            }
 
             // 批次间让权给事件循环；key 冲突由 build_change_key 内的 UUID nonce 防护
             tokio::task::yield_now().await;
@@ -2426,6 +2463,25 @@ async fn execute_download_with_progress_v2(
 ) -> Result<(SyncExecutionResult, usize), String> {
     let _start = std::time::Instant::now();
 
+    // [P0 Fix] prune-gap 检测：避免本地版本落后于云端最早可用版本时静默丢数据
+    let min_available = SyncManager::get_min_available_change_version(storage)
+        .await
+        .map_err(|e| format!("查询云端变更版本失败: {}", e))?;
+    let since_version = local_manifest
+        .databases
+        .values()
+        .map(|s| s.data_version)
+        .min()
+        .unwrap_or(0);
+    if SyncManager::has_prune_gap(since_version, min_available) {
+        return Err(format!(
+            "检测到云端变更断层：本设备本地版本为 {}，云端最早可用版本为 {}。\
+             部分变更可能已被清理，请先通过 ZIP 完整恢复后重新同步。",
+            since_version,
+            min_available.map_or("无".to_string(), |v| v.to_string())
+        ));
+    }
+
     emitter.emit_downloading(0, 0, None).await;
 
     let (exec_result, downloaded_changes) = manager
@@ -2526,6 +2582,25 @@ async fn execute_bidirectional_with_progress_v2(
     emitter: &OptionalEmitter,
 ) -> Result<(SyncExecutionResult, usize), String> {
     let _start = std::time::Instant::now();
+
+    // [P0 Fix] prune-gap 检测：避免本地版本落后时静默丢数据
+    let min_available = SyncManager::get_min_available_change_version(storage)
+        .await
+        .map_err(|e| format!("查询云端变更版本失败: {}", e))?;
+    let since_version = local_manifest
+        .databases
+        .values()
+        .map(|s| s.data_version)
+        .min()
+        .unwrap_or(0);
+    if SyncManager::has_prune_gap(since_version, min_available) {
+        return Err(format!(
+            "检测到云端变更断层：本设备本地版本为 {}，云端最早可用版本为 {}。\
+             部分变更可能已被清理，请先通过 ZIP 完整恢复后重新同步。",
+            since_version,
+            min_available.map_or("无".to_string(), |v| v.to_string())
+        ));
+    }
 
     // 先执行下载同步（不先发射 downloading 事件，避免在无内容时发操导致百分比倒退）
     let (exec_result, change_ids, downloaded_changes) = manager

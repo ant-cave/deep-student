@@ -365,26 +365,26 @@ impl DebugLogger {
         }
 
         // 可选：输出到控制台（默认关闭，设置 DSTU_CONSOLE_LOG=true 启用）
+        // 使用统一日志格式：[HH:MM:SS.mmm] [LEVEL] [module:operation] message
         if console_logging_enabled() {
+            let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+            let time_str = now.format("%H:%M:%S%.3f").to_string();
             match level {
                 LogLevel::ERROR => error!(
-                    "[{}] [{}] {}: {:?}",
-                    module, operation, log_entry.timestamp, log_entry.data
+                    "[{}] [ERROR] [{}:{}] {:?}",
+                    time_str, module, operation, log_entry.data
                 ),
                 LogLevel::WARN => warn!(
-                    "[{}] [{}] {}: {:?}",
-                    module, operation, log_entry.timestamp, log_entry.data
+                    "[{}] [WARN] [{}:{}] {:?}",
+                    time_str, module, operation, log_entry.data
                 ),
                 LogLevel::INFO => info!(
-                    "[{}] [{}] {}: {:?}",
-                    module, operation, log_entry.timestamp, log_entry.data
+                    "[{}] [INFO] [{}:{}] {:?}",
+                    time_str, module, operation, log_entry.data
                 ),
                 _ => tracing::debug!(
-                    "[{}] [{}] {}: {:?}",
-                    module,
-                    operation,
-                    log_entry.timestamp,
-                    log_entry.data
+                    "[{}] [DEBUG] [{}:{}] {:?}",
+                    time_str, module, operation, log_entry.data
                 ),
             }
         }

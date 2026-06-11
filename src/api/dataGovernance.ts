@@ -692,6 +692,7 @@ export async function importZip(
  * 返回当前设备的同步状态信息
  */
 export async function getSyncStatus(): Promise<SyncStatusResponse> {
+  console.info('[CloudSync] getSyncStatus (data governance)');
   return invoke<SyncStatusResponse>('data_governance_get_sync_status');
 }
 
@@ -703,6 +704,7 @@ export async function detectConflicts(
   cloudManifestJson?: string,
   cloudConfig?: CloudStorageConfig
 ): Promise<ConflictDetectionResponse> {
+  console.info('[CloudSync] detectConflicts: hasManifest=%s, hasConfig=%s', !!cloudManifestJson, !!cloudConfig);
   return invoke<ConflictDetectionResponse>('data_governance_detect_conflicts', {
     cloudManifestJson,
     cloudConfig,
@@ -735,6 +737,12 @@ export async function runSync(
   cloudConfig?: CloudStorageConfig,
   strategy?: MergeStrategy
 ): Promise<SyncExecutionResponse> {
+  console.info(
+    '[CloudSync] runSync: direction=%s, strategy=%s, hasConfig=%s',
+    direction,
+    strategy ?? 'keep_latest',
+    !!cloudConfig
+  );
   return invoke<SyncExecutionResponse>('data_governance_run_sync', {
     direction,
     cloudConfig,
@@ -795,6 +803,7 @@ export async function importSyncData(
 export async function listenSyncProgress(
   options: SyncProgressListenerOptions
 ): Promise<UnlistenFn> {
+  console.info('[CloudSync] 开始监听同步进度事件...');
   let prevPhase: SyncPhase | null = null;
 
   return listen<SyncProgress>(SYNC_PROGRESS_EVENT, (event) => {
@@ -858,6 +867,12 @@ export async function runSyncWithProgress(
   cloudConfig?: CloudStorageConfig,
   strategy?: MergeStrategy
 ): Promise<SyncExecutionResponse> {
+  console.info(
+    '[CloudSync] runSyncWithProgress: direction=%s, strategy=%s, hasConfig=%s',
+    direction,
+    strategy ?? 'keep_latest',
+    !!cloudConfig
+  );
   return invoke<SyncExecutionResponse>('data_governance_run_sync_with_progress', {
     direction,
     cloudConfig,

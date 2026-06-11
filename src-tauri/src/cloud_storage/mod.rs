@@ -81,6 +81,17 @@ pub async fn create_storage(config: &CloudStorageConfig) -> Result<Box<dyn Cloud
 
     let root = config.root();
 
+    tracing::info!(
+        "[CloudStorage] 创建存储实例: provider={}, root={}, encrypted={}",
+        config.provider,
+        root,
+        config
+            .encryption_password
+            .as_ref()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
+    );
+
     match config.provider {
         StorageProvider::WebDav => {
             let webdav_config = config
@@ -119,9 +130,21 @@ pub async fn create_storage(config: &CloudStorageConfig) -> Result<Box<dyn Cloud
 /// 检查云存储连接
 #[tauri::command]
 pub async fn cloud_storage_check_connection(config: CloudStorageConfig) -> Result<bool> {
+    tracing::info!(
+        "[CloudStorage] 开始检查云存储连接: provider={}",
+        config.provider
+    );
     let storage = create_storage(&config).await?;
-    storage.check_connection().await?;
-    Ok(true)
+    match storage.check_connection().await {
+        Ok(()) => {
+            tracing::info!("[CloudStorage] 云存储连接成功: provider={}", config.provider);
+            Ok(true)
+        }
+        Err(e) => {
+            tracing::error!("[CloudStorage] 云存储连接失败: provider={}, error={}", config.provider, e);
+            Err(e)
+        }
+    }
 }
 
 /// 上传文件到云存储
@@ -131,15 +154,49 @@ pub async fn cloud_storage_put(
     key: String,
     data: Vec<u8>,
 ) -> Result<()> {
+    let size = data.len();
+    tracing::info!(
+        "[CloudStorage] 上传文件: key={}, size={}, provider={}",
+        key,
+        size,
+        config.provider
+    );
     let storage = create_storage(&config).await?;
-    storage.put(&key, &data).await
+    match storage.put(&key, &data).await {
+        Ok(()) => {
+            tracing::info!("[CloudStorage] 上传文件成功: key={}, size={}", key, size);
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("[CloudStorage] 上传文件失败: key={}, error={}", key, e);
+            Err(e)
+        }
+    }
 }
 
 /// 从云存储下载文件
 #[tauri::command]
 pub async fn cloud_storage_get(config: CloudStorageConfig, key: String) -> Result<Option<Vec<u8>>> {
+    tracing::info!(
+        "[CloudStorage] 下载文件: key={}, provider={}",
+        key,
+        config.provider
+    );
     let storage = create_storage(&config).await?;
-    storage.get(&key).await
+    match storage.get(&key).await {
+        Ok(Some(data)) => {
+            tracing::info!("[CloudStorage] 下载文件成功: key={}, size={}", key, data.len());
+            Ok(Some(data))
+        }
+        Ok(None) => {
+            tracing::info!("[CloudStorage] 下载文件不存在: key={}", key);
+            Ok(None)
+        }
+        Err(e) => {
+            tracing::error!("[CloudStorage] 下载文件失败: key={}, error={}", key, e);
+            Err(e)
+        }
+    }
 }
 
 /// 列出云存储中的文件
@@ -148,15 +205,43 @@ pub async fn cloud_storage_list(
     config: CloudStorageConfig,
     prefix: String,
 ) -> Result<Vec<FileInfo>> {
+    tracing::info!(
+        "[CloudStorage] 列出文件: prefix={}, provider={}",
+        prefix,
+        config.provider
+    );
     let storage = create_storage(&config).await?;
-    storage.list(&prefix).await
+    match storage.list(&prefix).await {
+        Ok(files) => {
+            tracing::info!(
+                "[CloudStorage] 列出文件成功: prefix={}, count={}",
+                prefix,
+                files.len()
+            );
+            Ok(files)
+        }
+        Err(e) => {
+            tracing::error!("[CloudStorage] 列出文件失败: prefix={}, error={}", prefix, e);
+            Err(e)
+        }
+    }
 }
 
 /// 删除云存储中的文件
 #[tauri::command]
 pub async fn cloud_storage_delete(config: CloudStorageConfig, key: String) -> Result<()> {
+    tracing::info!("[CloudStorage] 删除文件: key={}, provider={}", key, config.provider);
     let storage = create_storage(&config).await?;
-    storage.delete(&key).await
+    match storage.delete(&key).await {
+        Ok(()) => {
+            tracing::info!("[CloudStorage] 删除文件成功: key={}", key);
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("[CloudStorage] 删除文件失败: key={}, error={}", key, e);
+            Err(e)
+        }
+    }
 }
 
 /// 获取文件信息
@@ -165,6 +250,7 @@ pub async fn cloud_storage_stat(
     config: CloudStorageConfig,
     key: String,
 ) -> Result<Option<FileInfo>> {
+    tracing::info!("[CloudStorage] 查询文件信息: key={}, provider={}", key, config.provider);
     let storage = create_storage(&config).await?;
     storage.stat(&key).await
 }
@@ -172,8 +258,11 @@ pub async fn cloud_storage_stat(
 /// 检查文件是否存在
 #[tauri::command]
 pub async fn cloud_storage_exists(config: CloudStorageConfig, key: String) -> Result<bool> {
+    tracing::info!("[CloudStorage] 检查文件是否存在: key={}, provider={}", key, config.provider);
     let storage = create_storage(&config).await?;
-    storage.exists(&key).await
+    let exists = storage.exists(&key).await?;
+    tracing::info!("[CloudStorage] 检查文件是否存在: key={}, exists={}", key, exists);
+    Ok(exists)
 }
 
 // ============== Sync Manager Commands ==============
@@ -181,17 +270,27 @@ pub async fn cloud_storage_exists(config: CloudStorageConfig, key: String) -> Re
 /// 获取同步状态
 #[tauri::command]
 pub async fn cloud_sync_get_status(config: CloudStorageConfig) -> Result<SyncStatus> {
+    tracing::info!("[CloudSync] 查询同步状态: provider={}", config.provider);
     let storage = create_storage(&config).await?;
     let manager = CloudSyncManager::new(storage, get_device_id());
-    Ok(manager.get_status().await)
+    let status = manager.get_status().await;
+    tracing::info!(
+        "[CloudSync] 查询同步状态完成: connected={}, version_count={}",
+        status.connected,
+        status.cloud_version_count
+    );
+    Ok(status)
 }
 
 /// 列出云端所有备份版本
 #[tauri::command]
 pub async fn cloud_sync_list_versions(config: CloudStorageConfig) -> Result<Vec<BackupVersion>> {
+    tracing::info!("[CloudSync] 列出云端版本: provider={}", config.provider);
     let storage = create_storage(&config).await?;
     let manager = CloudSyncManager::new(storage, get_device_id());
-    manager.list_versions().await
+    let versions = manager.list_versions().await?;
+    tracing::info!("[CloudSync] 列出云端版本完成: count={}", versions.len());
+    Ok(versions)
 }
 
 /// 上传备份到云端（带实时进度事件）
@@ -205,6 +304,22 @@ pub async fn cloud_sync_upload(
     app_version: Option<String>,
     note: Option<String>,
 ) -> Result<UploadResult> {
+    let file_size = std::fs::metadata(&zip_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let encrypted = config
+        .encryption_password
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .is_some();
+    tracing::info!(
+        "[CloudSync] 开始上传备份: zip_path={}, size={}, encrypted={}, provider={}",
+        zip_path,
+        file_size,
+        encrypted,
+        config.provider
+    );
+
     // 如果配置了加密密码，先把 ZIP 加密到临时文件再上传
     // 临时文件在 ZIP 附近创建，上传成功后删除
     let mut encrypted_temp: Option<std::path::PathBuf> = None;
@@ -291,6 +406,12 @@ pub async fn cloud_sync_upload(
         },
     );
 
+    tracing::info!(
+        "[CloudSync] 上传备份完成: version={}, size={}, checksum={}",
+        result.version.id,
+        result.version.size,
+        &result.version.checksum[..32.min(result.version.checksum.len())]
+    );
     Ok(result)
 }
 
@@ -304,6 +425,12 @@ pub async fn cloud_sync_download(
     version_id: Option<String>,
     local_dir: String,
 ) -> Result<DownloadResult> {
+    tracing::info!(
+        "[CloudSync] 开始下载备份: version={:?}, local_dir={}, provider={}",
+        version_id,
+        local_dir,
+        config.provider
+    );
     let storage = create_storage(&config).await?;
     let manager = CloudSyncManager::new(storage, get_device_id());
 
@@ -393,6 +520,12 @@ pub async fn cloud_sync_download(
         },
     );
 
+    tracing::info!(
+        "[CloudSync] 下载备份完成: version={}, local_path={}, size={}",
+        result.version.id,
+        result.local_path,
+        result.version.size
+    );
     Ok(result)
 }
 
@@ -402,9 +535,16 @@ pub async fn cloud_sync_delete_version(
     config: CloudStorageConfig,
     version_id: String,
 ) -> Result<()> {
+    tracing::info!(
+        "[CloudSync] 删除云端版本: version={}, provider={}",
+        version_id,
+        config.provider
+    );
     let storage = create_storage(&config).await?;
     let manager = CloudSyncManager::new(storage, get_device_id());
-    manager.delete_version(&version_id).await
+    manager.delete_version(&version_id).await?;
+    tracing::info!("[CloudSync] 删除云端版本成功: version={}", version_id);
+    Ok(())
 }
 
 /// 获取设备 ID

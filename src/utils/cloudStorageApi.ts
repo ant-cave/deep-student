@@ -98,9 +98,18 @@ export function loadStoredCloudStorageConfigSafe(): CloudStorageConfig | null {
  */
 export async function loadStoredCloudStorageConfigWithCredentials(): Promise<CloudStorageConfig | null> {
   const safe = loadStoredCloudStorageConfigSafe();
-  if (!safe) return null;
+  if (!safe) {
+    console.info('[CloudSync] 加载云存储配置: 无已保存的配置');
+    return null;
+  }
 
   const credentials = await getCredentials().catch(() => null);
+  console.info(
+    '[CloudSync] 加载云存储配置: provider=%s, hasPassword=%s, encrypted=%s',
+    safe.provider,
+    !!credentials?.webdavPassword || !!credentials?.s3SecretAccessKey || !!credentials?.ftpPassword,
+    !!credentials?.encryptionPassword
+  );
   const encryptionPassword = credentials?.encryptionPassword ?? undefined;
 
   if (safe.provider === 'webdav') {
@@ -117,6 +126,20 @@ export async function loadStoredCloudStorageConfigWithCredentials(): Promise<Clo
     };
   }
 
+  if (safe.provider === 'ftp') {
+    return {
+      ...safe,
+      ftp: safe.ftp
+        ? {
+            ...safe.ftp,
+            password: credentials?.ftpPassword ?? '',
+          }
+        : undefined,
+      encryptionPassword,
+    };
+  }
+
+  // S3 及默认分支
   return {
     ...safe,
     s3: safe.s3
@@ -195,9 +218,13 @@ export interface DownloadResult {
  * 检查云存储连接
  */
 export async function checkConnection(config: CloudStorageConfig): Promise<boolean> {
+  console.info('[CloudSync] checkConnection: provider=%s, root=%s', config.provider, config.root ?? 'default');
   try {
-    return await invoke<boolean>('cloud_storage_check_connection', { config });
+    const result = await invoke<boolean>('cloud_storage_check_connection', { config });
+    console.info('[CloudSync] checkConnection result: %s', result);
+    return result;
   } catch (error: unknown) {
+    console.error('[CloudSync] checkConnection failed:', getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
@@ -210,9 +237,11 @@ export async function putFile(
   key: string,
   data: Uint8Array
 ): Promise<void> {
+  console.info('[CloudSync] putFile: key=%s, size=%d, provider=%s', key, data.length, config.provider);
   try {
     await invoke('cloud_storage_put', { config, key, data: Array.from(data) });
   } catch (error: unknown) {
+    console.error('[CloudSync] putFile failed: key=%s, %s', key, getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
@@ -224,10 +253,13 @@ export async function getFile(
   config: CloudStorageConfig,
   key: string
 ): Promise<Uint8Array | null> {
+  console.info('[CloudSync] getFile: key=%s, provider=%s', key, config.provider);
   try {
     const data = await invoke<number[] | null>('cloud_storage_get', { config, key });
+    console.info('[CloudSync] getFile result: key=%s, found=%s', key, data !== null);
     return data ? new Uint8Array(data) : null;
   } catch (error: unknown) {
+    console.error('[CloudSync] getFile failed: key=%s, %s', key, getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
@@ -239,9 +271,13 @@ export async function listFiles(
   config: CloudStorageConfig,
   prefix: string
 ): Promise<FileInfo[]> {
+  console.info('[CloudSync] listFiles: prefix=%s, provider=%s', prefix, config.provider);
   try {
-    return await invoke<FileInfo[]>('cloud_storage_list', { config, prefix });
+    const files = await invoke<FileInfo[]>('cloud_storage_list', { config, prefix });
+    console.info('[CloudSync] listFiles result: count=%d', files.length);
+    return files;
   } catch (error: unknown) {
+    console.error('[CloudSync] listFiles failed: prefix=%s, %s', prefix, getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
@@ -253,9 +289,11 @@ export async function deleteFile(
   config: CloudStorageConfig,
   key: string
 ): Promise<void> {
+  console.info('[CloudSync] deleteFile: key=%s, provider=%s', key, config.provider);
   try {
     await invoke('cloud_storage_delete', { config, key });
   } catch (error: unknown) {
+    console.error('[CloudSync] deleteFile failed: key=%s, %s', key, getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
@@ -267,9 +305,11 @@ export async function statFile(
   config: CloudStorageConfig,
   key: string
 ): Promise<FileInfo | null> {
+  console.info('[CloudSync] statFile: key=%s, provider=%s', key, config.provider);
   try {
     return await invoke<FileInfo | null>('cloud_storage_stat', { config, key });
   } catch (error: unknown) {
+    console.error('[CloudSync] statFile failed: key=%s, %s', key, getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
@@ -294,9 +334,11 @@ export async function fileExists(
  * 获取同步状态
  */
 export async function getSyncStatus(config: CloudStorageConfig): Promise<SyncStatus> {
+  console.info('[CloudSync] getSyncStatus: provider=%s', config.provider);
   try {
     return await invoke<SyncStatus>('cloud_sync_get_status', { config });
   } catch (error: unknown) {
+    console.error('[CloudSync] getSyncStatus failed: %s', getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
@@ -321,6 +363,7 @@ export async function uploadBackup(
   appVersion?: string,
   note?: string
 ): Promise<UploadResult> {
+  console.info('[CloudSync] uploadBackup: zipPath=%s, provider=%s, encrypted=%s', zipPath, config.provider, !!config.encryptionPassword);
   try {
     return await invoke<UploadResult>('cloud_sync_upload', {
       config,
@@ -329,6 +372,7 @@ export async function uploadBackup(
       note,
     });
   } catch (error: unknown) {
+    console.error('[CloudSync] uploadBackup failed: %s', getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
@@ -343,6 +387,7 @@ export async function downloadBackup(
   versionId: string | null,
   localDir: string
 ): Promise<DownloadResult> {
+  console.info('[CloudSync] downloadBackup: version=%s, localDir=%s, provider=%s', versionId ?? 'latest', localDir, config.provider);
   try {
     return await invoke<DownloadResult>('cloud_sync_download', {
       config,
@@ -350,6 +395,7 @@ export async function downloadBackup(
       localDir,
     });
   } catch (error: unknown) {
+    console.error('[CloudSync] downloadBackup failed: %s', getErrorMessage(error));
     throw new Error(getErrorMessage(error));
   }
 }
