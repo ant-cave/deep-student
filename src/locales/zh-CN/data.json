@@ -968,6 +968,22 @@
     "purge_confirm_desc": "此操作将删除所有应用数据（数据库、聊天记录、笔记、错题本等），仅保留备份文件。数据一旦删除将无法恢复。此操作会立即重启应用以完成清理。",
     "purge_confirm_button": "确认清空并重启",
     "purge_initiated": "正在清空数据，应用即将重启...",
-    "purge_failed": "清空数据失败"
+    "purge_failed": "清空数据失败",
+    "auto_sync": "自动同步",
+    "auto_sync_desc": "在特定时机自动执行云同步，保持多端数据一致",
+    "sync_on_startup": "启动时同步",
+    "sync_on_startup_desc": "应用启动后自动下载云端最新数据",
+    "sync_on_blur": "失焦时同步",
+    "sync_on_blur_desc": "窗口切换到后台时自动上传本地变更",
+    "sync_interval": "定时同步间隔",
+    "sync_interval_desc": "每隔固定时间执行双向同步",
+    "sync_interval_off": "关闭",
+    "sync_interval_15m": "15分钟",
+    "sync_interval_30m": "30分钟",
+    "sync_interval_1h": "1小时",
+    "auto_sync_started": "自动同步已开始",
+    "auto_sync_completed": "自动同步完成",
+    "auto_sync_error": "自动同步失败",
+    "auto_sync_running": "后台同步中"
   }
 }

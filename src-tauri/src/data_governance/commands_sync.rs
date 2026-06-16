@@ -683,43 +683,7 @@ impl FileLevelProgress<'_> {
     }
 }
 
-/// 工作区维护模式守卫：进入时暂停所有已加载工作区的数据库连接池
-/// （checkpoint TRUNCATE + 切换到内存池），Drop 时恢复磁盘连接池。
-///
-/// 确保 ws_*.db 文件级同步期间没有活跃 SQLite 连接：
-/// - 上传侧：checkpoint 保证 WAL 已合并进主文件，上传的库不缺数据；
-/// - 下载侧：覆盖 ws_*.db 时不会有连接持有旧文件句柄继续读写旧 inode。
-///
-/// 用 Drop 恢复保证 panic/Future 取消时连接池也能回到正常状态。
-struct WorkspaceMaintenanceGuard {
-    coordinator: std::sync::Arc<crate::chat_v2::workspace::WorkspaceCoordinator>,
-}
-
-impl WorkspaceMaintenanceGuard {
-    fn enter(
-        coordinator: Option<&std::sync::Arc<crate::chat_v2::workspace::WorkspaceCoordinator>>,
-    ) -> Option<Self> {
-        let coordinator = coordinator?.clone();
-        if let Err(e) = coordinator.enter_maintenance_mode() {
-            warn!(
-                "[data_governance] 进入工作区维护模式失败（继续同步，不中断）: {}",
-                e
-            );
-            return None;
-        }
-        Some(Self { coordinator })
-    }
-}
-
-impl Drop for WorkspaceMaintenanceGuard {
-    fn drop(&mut self) {
-        if let Err(e) = self.coordinator.exit_maintenance_mode() {
-            warn!("[data_governance] 退出工作区维护模式失败: {}", e);
-        }
-    }
-}
-
-/// 从 Tauri state 取 WorkspaceCoordinator（chat_v2 未初始化时返回 None）
+// 从 Tauri state 取 WorkspaceCoordinator（chat_v2 未初始化时返回 None）
 fn workspace_coordinator_from_app(
     app: &tauri::AppHandle,
 ) -> Option<std::sync::Arc<crate::chat_v2::workspace::WorkspaceCoordinator>> {
@@ -735,7 +699,6 @@ async fn run_file_level_sync(
     storage: &dyn crate::cloud_storage::CloudStorage,
     direction: SyncDirection,
     progress: Option<&FileLevelProgress<'_>>,
-    ws_coordinator: Option<&std::sync::Arc<crate::chat_v2::workspace::WorkspaceCoordinator>>,
 ) -> FileLevelSyncReport {
     let mut report = FileLevelSyncReport::default();
     let blobs_dir = active_dir.join("vfs_blobs");
@@ -746,9 +709,6 @@ async fn run_file_level_sync(
     }
 
     {
-        // ws_*.db 同步期间进入维护模式，结束后立即恢复（窗口仅覆盖本段）
-        let _ws_guard = WorkspaceMaintenanceGuard::enter(ws_coordinator);
-
         if direction != SyncDirection::Download {
             if let Err(e) = drain_workspace_deletion_queue(active_dir, manager, storage).await {
                 warn!("[data_governance] {}", e);
@@ -1356,13 +1316,20 @@ pub async fn data_governance_run_sync(
     cloud_config: Option<CloudStorageConfig>,
     strategy: Option<String>,
 ) -> Result<SyncExecutionResponse, String> {
+    data_governance_run_sync_internal(app, direction, cloud_config, strategy).await
+}
+
+/// 同步执行内部函数（可供自动同步服务调用，不需要 Tauri command 注册）
+pub async fn data_governance_run_sync_internal(
+    app: tauri::AppHandle,
+    direction: String,
+    cloud_config: Option<CloudStorageConfig>,
+    strategy: Option<String>,
+) -> Result<SyncExecutionResponse, String> {
     info!(
         "[data_governance] 开始执行同步: direction={}, strategy={:?}",
         direction, strategy
     );
-
-    // P0-6: 维护模式检查——禁止在备份/恢复/迁移期间访问数据库文件
-    check_maintenance_mode(&app)?;
 
     let start = Instant::now();
 
@@ -1444,9 +1411,6 @@ pub async fn data_governance_run_sync(
 
     let active_dir = get_active_data_dir(&app)?;
     let app_data_dir = get_app_data_dir(&app)?;
-
-    // ws_*.db 文件级同步时进入工作区维护模式所需（未初始化时为 None，降级为无守卫）
-    let ws_coordinator = workspace_coordinator_from_app(&app);
 
     // 创建同步管理器
     // [P0-2] 透传加密密码，让所有上传/下载走 DSBK 容器
@@ -1554,7 +1518,6 @@ pub async fn data_governance_run_sync(
                 storage.as_ref(),
                 SyncDirection::Upload,
                 None,
-                ws_coordinator.as_ref(),
             )
             .await;
             if file_report.failed {
@@ -1793,7 +1756,6 @@ pub async fn data_governance_run_sync(
                 storage.as_ref(),
                 SyncDirection::Upload,
                 None,
-                ws_coordinator.as_ref(),
             )
             .await;
             if file_report.failed {
@@ -1903,7 +1865,6 @@ pub async fn data_governance_run_sync(
                         storage.as_ref(),
                         file_direction,
                         None,
-                        ws_coordinator.as_ref(),
                     )
                     .await;
                     if file_report.failed {
@@ -2477,9 +2438,6 @@ pub async fn data_governance_run_sync_with_progress(
         direction, strategy
     );
 
-    // P0-6: 维护模式检查——禁止在备份/恢复/迁移期间访问数据库文件
-    check_maintenance_mode(&app)?;
-
     let start = Instant::now();
 
     // 创建进度发射器
@@ -2723,9 +2681,6 @@ pub async fn data_governance_run_sync_with_progress(
     // 使用 OptionalEmitter 包装
     let opt_emitter = OptionalEmitter::with_emitter(emitter.clone());
 
-    // ws_*.db 文件级同步时进入工作区维护模式所需（未初始化时为 None，降级为无守卫）
-    let ws_coordinator = workspace_coordinator_from_app(&app);
-
     // 执行同步（带进度回调）
     let result = match sync_direction {
         SyncDirection::Upload => {
@@ -2738,7 +2693,6 @@ pub async fn data_governance_run_sync_with_progress(
                 &active_dir,
                 &app_data_dir,
                 &opt_emitter.clone(),
-                ws_coordinator.as_ref(),
             )
             .await
         }
@@ -2751,7 +2705,6 @@ pub async fn data_governance_run_sync_with_progress(
                 &active_dir,
                 &app_data_dir,
                 &opt_emitter,
-                ws_coordinator.as_ref(),
             )
             .await
         }
@@ -2766,7 +2719,6 @@ pub async fn data_governance_run_sync_with_progress(
                 &active_dir,
                 &app_data_dir,
                 &opt_emitter,
-                ws_coordinator.as_ref(),
             )
             .await
         }
@@ -2909,7 +2861,6 @@ async fn execute_upload_with_progress_v2(
     active_dir: &std::path::Path,
     app_data_dir: &std::path::Path,
     emitter: &OptionalEmitter,
-    ws_coordinator: Option<&std::sync::Arc<crate::chat_v2::workspace::WorkspaceCoordinator>>,
 ) -> Result<(SyncExecutionResult, usize), String> {
     let start = std::time::Instant::now();
     let total = enriched.len() as u64;
@@ -2925,7 +2876,6 @@ async fn execute_upload_with_progress_v2(
         storage,
         SyncDirection::Upload,
         Some(&file_progress),
-        ws_coordinator,
     )
     .await;
     if file_report.failed {
@@ -3271,7 +3221,6 @@ async fn execute_download_with_progress_v2(
     active_dir: &std::path::Path,
     app_data_dir: &std::path::Path,
     emitter: &OptionalEmitter,
-    ws_coordinator: Option<&std::sync::Arc<crate::chat_v2::workspace::WorkspaceCoordinator>>,
 ) -> Result<(SyncExecutionResult, usize), String> {
     let _start = std::time::Instant::now();
 
@@ -3346,7 +3295,6 @@ async fn execute_download_with_progress_v2(
         storage,
         SyncDirection::Download,
         Some(&file_progress),
-        ws_coordinator,
     )
     .await;
     if file_report.failed {
@@ -3370,7 +3318,6 @@ async fn execute_bidirectional_with_progress_v2(
     active_dir: &std::path::Path,
     app_data_dir: &std::path::Path,
     emitter: &OptionalEmitter,
-    ws_coordinator: Option<&std::sync::Arc<crate::chat_v2::workspace::WorkspaceCoordinator>>,
 ) -> Result<(SyncExecutionResult, usize), String> {
     let _start = std::time::Instant::now();
 
@@ -3470,7 +3417,6 @@ async fn execute_bidirectional_with_progress_v2(
         storage,
         SyncDirection::Upload,
         Some(&file_upload_progress),
-        ws_coordinator,
     )
     .await;
     if file_upload_report.failed {
@@ -3600,7 +3546,6 @@ async fn execute_bidirectional_with_progress_v2(
         storage,
         SyncDirection::Download,
         Some(&file_download_progress),
-        ws_coordinator,
     )
     .await;
     if file_download_report.failed {

@@ -968,6 +968,22 @@
     "purge_confirm_desc": "This will delete all app data (databases, chat history, notes, mistakes, etc.), backup files will be preserved. Once deleted, data cannot be recovered. The app will restart immediately to complete the cleanup.",
     "purge_confirm_button": "Confirm Purge & Restart",
     "purge_initiated": "Purging data, app will restart shortly...",
-    "purge_failed": "Failed to purge data"
+    "purge_failed": "Failed to purge data",
+    "auto_sync": "Auto Sync",
+    "auto_sync_desc": "Automatically sync at specific times to keep data consistent across devices",
+    "sync_on_startup": "Sync on Startup",
+    "sync_on_startup_desc": "Automatically download latest cloud data when app starts",
+    "sync_on_blur": "Sync on Blur",
+    "sync_on_blur_desc": "Automatically upload local changes when window loses focus",
+    "sync_interval": "Sync Interval",
+    "sync_interval_desc": "Run bidirectional sync at fixed intervals",
+    "sync_interval_off": "Off",
+    "sync_interval_15m": "15 minutes",
+    "sync_interval_30m": "30 minutes",
+    "sync_interval_1h": "1 hour",
+    "auto_sync_started": "Auto sync started",
+    "auto_sync_completed": "Auto sync completed",
+    "auto_sync_error": "Auto sync failed",
+    "auto_sync_running": "Syncing in background"
   }
 }

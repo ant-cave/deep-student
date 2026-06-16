@@ -8,6 +8,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 // 🚀 性能优化：Settings, Dashboard, SOTADashboard 改为懒加载
 import { CaretLeft, CaretRight, CircleNotch, DownloadSimple, Terminal, Warning, X } from '@phosphor-icons/react';
 import { useSystemStatusStore } from '@/stores/systemStatusStore';
+import { useGlobalSyncStore } from '@/stores/syncStatusStore';
+import { AutoSyncIndicator } from '@/features/settings/components/data-governance/SyncIndicator';
 import { CommonTooltip } from '@/components/shared/CommonTooltip';
 import { cn } from '@/lib/utils';
 import { NotionButton } from '@/components/ui/NotionButton';
@@ -571,7 +573,7 @@ function App() {
   const maintenanceMode = useSystemStatusStore((s) => s.maintenanceMode);
   const maintenanceReason = useSystemStatusStore((s) => s.maintenanceReason);
 
-  // 🆕 任务3：应用启动时同步后端维护模式状态到前端 store
+  // 任务3：应用启动时同步后端维护模式状态到前端 store
   useEffect(() => {
     const syncMaintenanceStatus = async () => {
       try {
@@ -588,6 +590,41 @@ function App() {
     };
     syncMaintenanceStatus();
   }, []); // 仅启动时执行一次
+
+  // 窗口失焦/聚焦生命周期绑定：触发自动同步
+  useEffect(() => {
+    const handleWindowBlur = async () => {
+      const { syncOnBlur } = useGlobalSyncStore.getState();
+      if (!syncOnBlur) return;
+
+      try {
+        await invoke('on_window_blur_sync');
+      } catch (err) {
+        console.warn('[App] on_window_blur_sync failed:', err);
+      }
+    };
+
+    let unlisten: (() => void) | undefined;
+
+    const setup = async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const currentWindow = getCurrentWindow();
+        unlisten = await currentWindow.onBlurEvent(handleWindowBlur);
+      } catch {
+        // 非 Tauri 环境下静默忽略
+        try {
+          window.addEventListener('blur', handleWindowBlur);
+        } catch { /* non-critical */ }
+      }
+    };
+
+    void setup();
+    return () => {
+      unlisten?.();
+      try { window.removeEventListener('blur', handleWindowBlur); } catch { /* non-critical cleanup */ }
+    };
+  }, []);
 
   // 🌐 全局网络状态监测
   const { isOnline } = useNetworkStatus();
@@ -2628,6 +2665,9 @@ function App() {
       <Suspense fallback={null}>
         <LazyNoteEditorPortal />
       </Suspense>
+
+      {/* 非阻塞自动同步指示器 */}
+      <AutoSyncIndicator />
       </DesktopShellSidebarPortalProvider>
       </LearningHubNavigationProvider>
       </MobileHeaderProvider>

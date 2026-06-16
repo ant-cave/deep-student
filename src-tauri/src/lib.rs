@@ -24,6 +24,7 @@ pub mod debug_commands;
 pub mod debug_log_service; // 调试日志持久化服务（JSON 文件 + 多级过滤）
 pub mod debug_logger;
 
+pub mod auto_sync_service; // 自动同步调度器（非阻塞云同步）
 pub mod anr_watchdog; // ANR 看门狗（Android 主线程卡顿检测）
 pub mod background_tasks; // 全局后台任务追踪器（Audit 2 R-2.6：统一管理 fire-and-forget 任务并支持优雅关闭）
 pub mod backup_common;
@@ -771,6 +772,14 @@ pub fn run() {
                 });
             }
 
+            // 自动同步调度器（非阻塞）
+            {
+                let app_handle_for_sync = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::auto_sync_service::start_auto_sync_scheduler(app_handle_for_sync).await;
+                });
+            }
+
             // macOS 窗口圆角设置
             #[cfg(target_os = "macos")]
             {
@@ -1075,6 +1084,11 @@ pub fn run() {
             crate::backup_config::pick_backup_directory,
             crate::backup_config::clear_backup_directory,
             crate::backup_config::get_default_backup_directory,
+            // 自动同步配置
+            crate::auto_sync_service::get_auto_sync_config,
+            crate::auto_sync_service::set_auto_sync_config,
+            crate::auto_sync_service::trigger_auto_sync,
+            crate::auto_sync_service::on_window_blur_sync,
             // Cloud storage (unified WebDAV + S3 interface)
             crate::cloud_storage::cloud_storage_check_connection,
             crate::cloud_storage::cloud_storage_put,
@@ -1729,6 +1743,11 @@ pub fn run() {
             ,crate::data_governance::commands_sync::data_governance_purge_resolved_conflicts
             // Prune 断层检测
             ,crate::data_governance::commands_sync::data_governance_detect_prune_gap
+            // 自动同步命令
+            ,crate::auto_sync_service::get_auto_sync_config
+            ,crate::auto_sync_service::set_auto_sync_config
+            ,crate::auto_sync_service::trigger_auto_sync
+            ,crate::auto_sync_service::on_window_blur_sync
             // 任务恢复命令（断点续传支持）
             ,crate::data_governance::commands_backup::data_governance_resume_backup_job
             ,crate::data_governance::commands_backup::data_governance_list_resumable_jobs

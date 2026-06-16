@@ -26,6 +26,7 @@ import {
   Upload,
   Download,
   ArrowsLeftRight,
+  Timer,
 } from '@phosphor-icons/react';
 import { NotionButton } from '@/components/ui/NotionButton';
 import { AppSelect } from '@/components/ui/app-menu';
@@ -34,6 +35,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Alert, AlertDescription } from '@/components/ui/shad/Alert';
 import { Separator } from '@/components/ui/shad/Separator';
 import { Progress } from '@/components/ui/shad/Progress';
+import { Switch } from '@/components/ui/shad/Switch';
+import { Label } from '@/components/ui/shad/Label';
 import { SettingSection } from './SettingsCommon';
 import { ConflictResolutionDialog, MergeStrategy } from '@/components/ConflictResolutionDialog';
 import { useConflictResolution } from '@/hooks/useConflictResolution';
@@ -100,6 +103,92 @@ export const SyncSettingsSection: React.FC<SyncSettingsSectionProps> = ({
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   // 全局同步状态：与数据治理面板等其他入口共享，任一入口同步时本入口按钮禁用
   const isSyncing = useGlobalSyncStore((s) => s.isSyncing);
+
+  // 自动同步配置
+  const isAutoSyncEnabled = useGlobalSyncStore((s) => s.isAutoSyncEnabled);
+  const autoSyncInterval = useGlobalSyncStore((s) => s.autoSyncInterval);
+  const syncOnStartup = useGlobalSyncStore((s) => s.syncOnStartup);
+  const syncOnBlur = useGlobalSyncStore((s) => s.syncOnBlur);
+  const loadAutoSyncConfig = useGlobalSyncStore((s) => s.loadAutoSyncConfig);
+  const saveAutoSyncConfig = useGlobalSyncStore((s) => s.saveAutoSyncConfig);
+
+  // 加载自动同步配置
+  useEffect(() => {
+    void loadAutoSyncConfig();
+  }, [loadAutoSyncConfig]);
+
+  // 自动同步间隔选项
+  const syncIntervalOptions = useMemo(() => [
+    { value: '0', label: t('data:governance.sync_interval_off', '关闭') },
+    { value: '900000', label: t('data:governance.sync_interval_15m', '15分钟') },
+    { value: '1800000', label: t('data:governance.sync_interval_30m', '30分钟') },
+    { value: '3600000', label: t('data:governance.sync_interval_1h', '1小时') },
+  ], [t]);
+
+  // 处理自动同步配置变更
+  const handleAutoSyncToggle = useCallback(async (checked: boolean) => {
+    try {
+      await saveAutoSyncConfig({
+        isAutoSyncEnabled: checked,
+        autoSyncInterval,
+        syncOnStartup,
+        syncOnBlur,
+      });
+    } catch (err: unknown) {
+      showGlobalNotification(
+        'error',
+        `${t('data:governance.auto_sync')}: ${getErrorMessage(err)}`
+      );
+    }
+  }, [autoSyncInterval, syncOnBlur, syncOnStartup, saveAutoSyncConfig, t]);
+
+  const handleSyncIntervalChange = useCallback(async (value: string) => {
+    try {
+      await saveAutoSyncConfig({
+        isAutoSyncEnabled,
+        autoSyncInterval: parseInt(value, 10),
+        syncOnStartup,
+        syncOnBlur,
+      });
+    } catch (err: unknown) {
+      showGlobalNotification(
+        'error',
+        `${t('data:governance.sync_interval')}: ${getErrorMessage(err)}`
+      );
+    }
+  }, [isAutoSyncEnabled, syncOnBlur, syncOnStartup, saveAutoSyncConfig, t]);
+
+  const handleSyncOnStartupToggle = useCallback(async (checked: boolean) => {
+    try {
+      await saveAutoSyncConfig({
+        isAutoSyncEnabled,
+        autoSyncInterval,
+        syncOnStartup: checked,
+        syncOnBlur,
+      });
+    } catch (err: unknown) {
+      showGlobalNotification(
+        'error',
+        `${t('data:governance.sync_on_startup')}: ${getErrorMessage(err)}`
+      );
+    }
+  }, [isAutoSyncEnabled, autoSyncInterval, syncOnBlur, saveAutoSyncConfig, t]);
+
+  const handleSyncOnBlurToggle = useCallback(async (checked: boolean) => {
+    try {
+      await saveAutoSyncConfig({
+        isAutoSyncEnabled,
+        autoSyncInterval,
+        syncOnStartup,
+        syncOnBlur: checked,
+      });
+    } catch (err: unknown) {
+      showGlobalNotification(
+        'error',
+        `${t('data:governance.sync_on_blur')}: ${getErrorMessage(err)}`
+      );
+    }
+  }, [isAutoSyncEnabled, autoSyncInterval, syncOnStartup, saveAutoSyncConfig, t]);
 
   // 合并策略（与数据治理仪表盘 SyncTab 保持一致，不再硬编码 keep_latest）
   const [syncStrategy, setSyncStrategy] = useState<MergeStrategy>('keep_latest');
@@ -545,6 +634,83 @@ export const SyncSettingsSection: React.FC<SyncSettingsSectionProps> = ({
               </CardContent>
             </Card>
           )}
+        </CardContent>
+      </Card>
+
+      {/* 自动同步配置 */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Timer className="h-5 w-5 text-muted-foreground" />
+            <CardTitle className="text-base">
+              {t('data:governance.auto_sync')}
+            </CardTitle>
+          </div>
+          <CardDescription>
+            {t('data:governance.auto_sync_desc')}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* 自动同步总开关 */}
+          <div className="flex items-center justify-between">
+            <div className="space-y-0.5">
+              <Label>{t('data:governance.auto_sync')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('data:governance.auto_sync_desc')}
+              </p>
+            </div>
+            <Switch
+              checked={isAutoSyncEnabled}
+              onCheckedChange={handleAutoSyncToggle}
+            />
+          </div>
+
+          {/* 定时同步间隔（仅当自动同步开启时显示） */}
+          {isAutoSyncEnabled && (
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label>{t('data:governance.sync_interval')}</Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('data:governance.sync_interval_desc')}
+                </p>
+              </div>
+              <AppSelect
+                value={String(autoSyncInterval)}
+                onValueChange={handleSyncIntervalChange}
+                options={syncIntervalOptions}
+                size="sm"
+                variant="outline"
+              />
+            </div>
+          )}
+
+          {/* 启动时同步 */}
+          <div className="flex items-center justify-between">
+            <div className="space-y-0.5">
+              <Label>{t('data:governance.sync_on_startup')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('data:governance.sync_on_startup_desc')}
+              </p>
+            </div>
+            <Switch
+              checked={syncOnStartup}
+              onCheckedChange={handleSyncOnStartupToggle}
+            />
+          </div>
+
+          {/* 失焦时同步 */}
+          <div className="flex items-center justify-between">
+            <div className="space-y-0.5">
+              <Label>{t('data:governance.sync_on_blur')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('data:governance.sync_on_blur_desc')}
+              </p>
+            </div>
+            <Switch
+              checked={syncOnBlur}
+              onCheckedChange={handleSyncOnBlurToggle}
+            />
+          </div>
         </CardContent>
       </Card>
 

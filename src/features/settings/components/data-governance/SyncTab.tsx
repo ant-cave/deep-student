@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/shad/Table";
 import { AppSelect } from "@/components/ui/app-menu";
 import { CloudStorageSection } from "../CloudStorageSection";
+import { SyncSettingsSection } from "../SyncSettingsSection";
 import { RecordConflictsPanel } from "./RecordConflictsPanel";
 import { SyncQuarantinePanel } from "./SyncQuarantinePanel";
 import { SyncIndicator } from "./SyncIndicator";
@@ -494,6 +495,9 @@ export const SyncTab: React.FC<SyncTabProps> = ({
             />
           </div>
         )}
+
+        {/* 自动同步配置 */}
+        <SyncSettingsSection />
       </div>
 
       {/* 冲突信息 */}
