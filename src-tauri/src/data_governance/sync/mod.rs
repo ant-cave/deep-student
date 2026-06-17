@@ -457,8 +457,26 @@ pub struct WorkspaceEntry {
 pub struct BlobsManifest {
     /// content_hash → 条目
     pub entries: HashMap<String, BlobEntry>,
+    /// 归档列表，按 seq 递增
+    #[serde(default)]
+    pub archives: Vec<ArchiveEntry>,
     #[serde(default)]
     pub updated_at: String,
+}
+
+/// 归档文件元数据
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchiveEntry {
+    /// 归档序号（从 1 开始递增）
+    pub seq: u32,
+    /// 归档文件的 sha256
+    pub sha256: String,
+    /// 归档文件大小（字节）
+    pub size: u64,
+    /// 归档包含的 blob 数量
+    pub blob_count: usize,
+    /// 创建时间（RFC3339）
+    pub created_at: String,
 }
 
 /// 单个 blob 的同步条目
@@ -469,6 +487,9 @@ pub struct BlobEntry {
     pub size: u64,
     #[serde(default)]
     pub updated_at: String,
+    /// 所属归档序号，0 表示逐个上传模式（旧版兼容）
+    #[serde(default)]
+    pub archive_seq: u32,
 }
 
 /// VFS Blob 同步结果，区分完全成功与部分失败
@@ -478,6 +499,12 @@ pub struct BlobSyncOutcome {
     pub downloaded: usize,
     pub upload_failures: Vec<String>,
     pub download_failures: Vec<String>,
+    /// 上传的归档数量
+    #[serde(default)]
+    pub archives_uploaded: usize,
+    /// 下载的归档数量
+    #[serde(default)]
+    pub archives_downloaded: usize,
 }
 
 impl BlobSyncOutcome {
@@ -8182,6 +8209,119 @@ impl SyncManager {
     ///
     const BLOB_MAX_RETRIES: u32 = 3;
     const BLOB_RETRY_BASE_MS: u64 = 500;
+    /// 归档文件大小上限（100MB）
+    const ARCHIVE_MAX_SIZE: u64 = 100 * 1024 * 1024;
+    /// 小批量阈值：数量 < 此值且总大小 < 1MB 时回退到逐个上传
+    const SMALL_BATCH_COUNT: usize = 3;
+    const SMALL_BATCH_SIZE: u64 = 1024 * 1024;
+
+    // =========================================================================
+    // Blob 归档打包 / 解压工具
+    // =========================================================================
+
+    /// 将一组 blob 文件打包为 zip 归档，返回 zip 字节
+    fn pack_blobs_zip(files: &[(String, &std::path::Path)]) -> Result<Vec<u8>, SyncError> {
+        use std::io::{Cursor, Write};
+
+        let mut buf = Vec::new();
+        {
+            let mut zip_writer = zip::ZipWriter::new(Cursor::new(&mut buf));
+
+            let options = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+
+            for (entry_name, path) in files {
+                let content = std::fs::read(path)
+                    .map_err(|e| SyncError::Database(format!("读取 blob 文件失败: {}", e)))?;
+
+                zip_writer
+                    .start_file(entry_name, options)
+                    .map_err(|e| SyncError::Database(format!("创建 zip 条目失败: {}", e)))?;
+                zip_writer
+                    .write_all(&content)
+                    .map_err(|e| SyncError::Database(format!("写入 zip 条目失败: {}", e)))?;
+            }
+
+            zip_writer
+                .finish()
+                .map_err(|e| SyncError::Database(format!("关闭 zip 失败: {}", e)))?;
+        }
+
+        Ok(buf)
+    }
+
+    /// 解压 zip 归档到目标目录，返回成功解压的文件路径列表
+    fn unpack_blobs_zip(
+        data: &[u8],
+        dest_dir: &std::path::Path,
+    ) -> Result<Vec<std::path::PathBuf>, SyncError> {
+        use std::io::{self, Cursor, Read};
+
+        let cursor = Cursor::new(data);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| SyncError::Database(format!("解压 zip 失败: {}", e)))?;
+
+        let mut extracted = Vec::new();
+
+        for i in 0..archive.len() {
+            let mut file = archive
+                .by_index(i)
+                .map_err(|e| SyncError::Database(format!("读取 zip 条目失败: {}", e)))?;
+
+            let entry_name = file.name().to_string();
+            let dest_path = dest_dir.join(&entry_name);
+
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    SyncError::Database(format!("创建目录失败: {}", e))
+                })?;
+            }
+
+            let mut out_file = std::fs::File::create(&dest_path)
+                .map_err(|e| SyncError::Database(format!("创建文件失败: {}", e)))?;
+            io::copy(&mut file, &mut out_file)
+                .map_err(|e| SyncError::Database(format!("写入文件失败: {}", e)))?;
+
+            extracted.push(dest_path);
+        }
+
+        Ok(extracted)
+    }
+
+    /// 将文件分组成多个批次，每个批次不超过 ARCHIVE_MAX_SIZE
+    fn split_into_archive_batches(
+        files: &[(String, std::path::PathBuf, u64)],
+    ) -> Vec<Vec<(String, &std::path::Path)>> {
+        let mut batches: Vec<Vec<(String, &std::path::Path)>> = Vec::new();
+        let mut current_batch: Vec<(String, &std::path::Path)> = Vec::new();
+        let mut current_size: u64 = 0;
+
+        for (name, path, size) in files {
+            // 单个文件超过上限，独立成批
+            if *size > Self::ARCHIVE_MAX_SIZE {
+                if !current_batch.is_empty() {
+                    batches.push(std::mem::take(&mut current_batch));
+                    current_size = 0;
+                }
+                batches.push(vec![(name.clone(), path.as_path())]);
+                continue;
+            }
+
+            if current_size + size > Self::ARCHIVE_MAX_SIZE {
+                batches.push(std::mem::take(&mut current_batch));
+                current_size = 0;
+            }
+
+            current_batch.push((name.clone(), path.as_path()));
+            current_size += size;
+        }
+
+        if !current_batch.is_empty() {
+            batches.push(current_batch);
+        }
+
+        batches
+    }
 
     /// 策略：
     /// - 本地有但云端没有 → 上传
@@ -8212,159 +8352,516 @@ impl SyncManager {
 
         let cloud_manifest = self.download_blobs_manifest(storage).await?;
 
+        // Check if cloud manifest has archives support (new version)
+        let has_archives = !cloud_manifest.archives.is_empty();
+
         let mut local_blobs: HashMap<String, std::path::PathBuf> = HashMap::new();
         Self::scan_blobs_dir(blobs_dir, &mut local_blobs)?;
 
         let mut new_manifest = cloud_manifest.clone();
         let mut uploaded = 0usize;
+        let mut uploaded_archive_count = 0usize;
         let mut upload_failures: Vec<String> = Vec::new();
 
+        // ===================================================================
+        // Upload phase
+        // ===================================================================
         if direction != SyncDirection::Download {
+            // Find new blobs (local has, cloud doesn't)
+            let mut new_blob_files: Vec<(String, std::path::PathBuf, u64)> = Vec::new();
             for (hash, path) in &local_blobs {
                 if cloud_manifest.entries.contains_key(hash.as_str()) {
                     continue;
                 }
-                let relative = path
-                    .strip_prefix(blobs_dir)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let key = format!("{}/{}", Self::BLOBS_CLOUD_PREFIX, relative);
                 let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                let updated_at = Self::file_mtime_rfc3339(path);
-
-                let mut last_err = String::new();
-                let mut ok = false;
-                for attempt in 0..Self::BLOB_MAX_RETRIES {
-                    let transfer_progress = Self::file_transfer_progress(
-                        progress.as_ref(),
-                        format!("VFS blob {}", hash),
-                    );
-                    match storage.put_file(&key, path, transfer_progress).await {
-                        Ok(_) => {
-                            new_manifest.entries.insert(
-                                hash.clone(),
-                                BlobEntry {
-                                    relative_path: relative.clone(),
-                                    size,
-                                    updated_at: updated_at.clone(),
-                                },
-                            );
-                            uploaded += 1;
-                            ok = true;
-                            break;
-                        }
-                        Err(e) => {
-                            last_err = e.to_string();
-                            if attempt + 1 < Self::BLOB_MAX_RETRIES {
-                                let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
-                                tracing::warn!(
-                                    "[sync] blob 上传重试 {}/{}: {}: {}",
-                                    attempt + 1,
-                                    Self::BLOB_MAX_RETRIES,
-                                    hash,
-                                    e
-                                );
-                                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                            }
-                        }
-                    }
-                }
-                if !ok {
-                    tracing::error!("[sync] blob 上传最终失败: {}: {}", hash, last_err);
-                    upload_failures.push(hash.clone());
-                }
+                new_blob_files.push((hash.clone(), path.clone(), size));
             }
-        }
 
-        let mut downloaded_count = 0usize;
-        let mut download_failures: Vec<String> = Vec::new();
+            // Determine if small batch: fall back to individual uploads
+            let is_small_batch = new_blob_files.len() < Self::SMALL_BATCH_COUNT
+                && new_blob_files.iter().map(|(_, _, s)| *s).sum::<u64>() < Self::SMALL_BATCH_SIZE;
 
-        if direction != SyncDirection::Upload {
-            for (hash, cloud_entry) in &cloud_manifest.entries {
-                if local_blobs.contains_key(hash.as_str()) {
-                    continue;
-                }
-                let dest = blobs_dir.join(&cloud_entry.relative_path);
-                if let Some(parent) = dest.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let key = format!("{}/{}", Self::BLOBS_CLOUD_PREFIX, cloud_entry.relative_path);
+            if is_small_batch {
+                // Small batch: individual uploads (legacy mode)
+                for (hash, path, size) in &new_blob_files {
+                    let relative = path
+                        .strip_prefix(blobs_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let key = format!("{}/{}", Self::BLOBS_CLOUD_PREFIX, relative);
+                    let updated_at = Self::file_mtime_rfc3339(path);
 
-                let mut last_err = String::new();
-                let mut ok = false;
-                for attempt in 0..Self::BLOB_MAX_RETRIES {
-                    let transfer_progress = Self::file_transfer_progress(
-                        progress.as_ref(),
-                        format!("VFS blob {}", hash),
-                    );
-                    match storage
-                        .get_file(&key, &dest, Some(hash), transfer_progress)
-                        .await
-                    {
-                        Ok(_) => {
-                            let actual_size =
-                                std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-                            if cloud_entry.size > 0 && actual_size != cloud_entry.size {
-                                last_err = format!(
-                                    "blob 大小不匹配: 期望 {} 字节, 实际 {} 字节",
-                                    cloud_entry.size, actual_size
+                    let mut last_err = String::new();
+                    let mut ok = false;
+                    for attempt in 0..Self::BLOB_MAX_RETRIES {
+                        let transfer_progress = Self::file_transfer_progress(
+                            progress.as_ref(),
+                            format!("VFS blob {}", hash),
+                        );
+                        match storage.put_file(&key, path, transfer_progress).await {
+                            Ok(_) => {
+                                new_manifest.entries.insert(
+                                    hash.clone(),
+                                    BlobEntry {
+                                        relative_path: relative.clone(),
+                                        size: *size,
+                                        updated_at: updated_at.clone(),
+                                        archive_seq: 0,
+                                    },
                                 );
-                                let _ = std::fs::remove_file(&dest);
+                                uploaded += 1;
+                                ok = true;
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = e.to_string();
                                 if attempt + 1 < Self::BLOB_MAX_RETRIES {
                                     let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
                                     tracing::warn!(
-                                        "[sync] blob 大小校验失败，重试 {}/{}: {}: {}",
+                                        "[sync] blob 上传重试 {}/{}: {}: {}",
                                         attempt + 1,
                                         Self::BLOB_MAX_RETRIES,
                                         hash,
-                                        last_err
+                                        e
                                     );
                                     tokio::time::sleep(std::time::Duration::from_millis(delay))
                                         .await;
                                 }
-                                continue;
-                            }
-                            downloaded_count += 1;
-                            ok = true;
-                            break;
-                        }
-                        Err(e) => {
-                            last_err = e.to_string();
-                            // 清理可能写到一半的文件
-                            let _ = std::fs::remove_file(&dest);
-                            if attempt + 1 < Self::BLOB_MAX_RETRIES {
-                                let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
-                                tracing::warn!(
-                                    "[sync] blob 下载重试 {}/{}: {}: {}",
-                                    attempt + 1,
-                                    Self::BLOB_MAX_RETRIES,
-                                    hash,
-                                    e
-                                );
-                                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                             }
                         }
                     }
+                    if !ok {
+                        tracing::error!("[sync] blob 上传最终失败: {}: {}", hash, last_err);
+                        upload_failures.push(hash.clone());
+                    }
                 }
-                if !ok {
-                    tracing::error!("[sync] blob 下载最终失败: {}: {}", hash, last_err);
-                    download_failures.push(hash.clone());
+            } else if !new_blob_files.is_empty() {
+                // Large batch: archive mode
+                let batches = Self::split_into_archive_batches(&new_blob_files);
+                let next_seq = cloud_manifest
+                    .archives
+                    .iter()
+                    .map(|a| a.seq)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+
+                for (batch_idx, batch) in batches.into_iter().enumerate() {
+                    let archive_seq = next_seq + batch_idx as u32;
+
+                    // Pack zip archive
+                    let zip_data = match Self::pack_blobs_zip(&batch) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            tracing::error!("[sync] blob 归档打包失败: {}", e);
+                            for (hash, _) in &batch {
+                                upload_failures.push(hash.clone());
+                            }
+                            continue;
+                        }
+                    };
+
+                    // zstd compress outer layer
+                    let compressed = match zstd::stream::encode_all(
+                        std::io::Cursor::new(&zip_data),
+                        0,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!("[sync] blob 归档 zstd 压缩失败: {}", e);
+                            for (hash, _) in &batch {
+                                upload_failures.push(hash.clone());
+                            }
+                            continue;
+                        }
+                    };
+
+                    // Encrypt (reuses existing e2e encryption)
+                    let payload = match self.encode_payload(&compressed) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::error!("[sync] blob 归档加密失败: {}", e);
+                            for (hash, _) in &batch {
+                                upload_failures.push(hash.clone());
+                            }
+                            continue;
+                        }
+                    };
+
+                    // Upload archive
+                    let archive_key = format!(
+                        "{}/blobs_archive_{:04}.zip.zst",
+                        Self::BLOBS_CLOUD_PREFIX, archive_seq
+                    );
+
+                    let mut last_err = String::new();
+                    let mut ok = false;
+                    for attempt in 0..Self::BLOB_MAX_RETRIES {
+                        let transfer_progress = Self::file_transfer_progress(
+                            progress.as_ref(),
+                            format!("Blob 归档 {}", archive_seq),
+                        );
+                        match storage.put(&archive_key, &payload).await {
+                            Ok(_) => {
+                                // Calculate archive hash using sha256
+                                use sha2::{Digest as Sha2Digest, Sha256};
+                                let mut hasher = Sha256::new();
+                                hasher.update(&payload);
+                                let archive_hash = format!("{:x}", hasher.finalize());
+
+                                let archive_size = payload.len() as u64;
+                                new_manifest.archives.push(ArchiveEntry {
+                                    seq: archive_seq,
+                                    sha256: archive_hash,
+                                    size: archive_size,
+                                    blob_count: batch.len(),
+                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                });
+
+                                // Update manifest entries for each blob in this archive
+                                for (hash, path) in &batch {
+                                    let relative = path
+                                        .strip_prefix(blobs_dir)
+                                        .unwrap_or(path)
+                                        .to_string_lossy()
+                                        .replace('\\', "/");
+                                    let size = std::fs::metadata(path)
+                                        .map(|m| m.len())
+                                        .unwrap_or(0);
+                                    new_manifest.entries.insert(
+                                        hash.clone(),
+                                        BlobEntry {
+                                            relative_path: relative.clone(),
+                                            size,
+                                            updated_at: Self::file_mtime_rfc3339(path),
+                                            archive_seq,
+                                        },
+                                    );
+                                }
+                                uploaded += batch.len();
+                                uploaded_archive_count += 1;
+                                ok = true;
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = e.to_string();
+                                if attempt + 1 < Self::BLOB_MAX_RETRIES {
+                                    let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
+                                    tracing::warn!(
+                                        "[sync] blob 归档上传重试 {}/{}: seq={}: {}",
+                                        attempt + 1,
+                                        Self::BLOB_MAX_RETRIES,
+                                        archive_seq,
+                                        e
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    if !ok {
+                        tracing::error!(
+                            "[sync] blob 归档上传最终失败: seq={}: {}",
+                            archive_seq,
+                            last_err
+                        );
+                        for (hash, _) in &batch {
+                            upload_failures.push(hash.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // ===================================================================
+        // Download phase
+        // ===================================================================
+        let mut downloaded_count = 0usize;
+        let mut downloaded_archive_count = 0usize;
+        let mut download_failures: Vec<String> = Vec::new();
+
+        if direction != SyncDirection::Upload {
+            if has_archives {
+                // Archive-based download
+                // Find missing blobs
+                let mut missing_by_archive: HashMap<u32, Vec<(String, String)>> =
+                    HashMap::new(); // archive_seq -> [(hash, relative_path)]
+                let mut missing_individual: Vec<(String, String)> = Vec::new();
+
+                for (hash, cloud_entry) in &cloud_manifest.entries {
+                    if local_blobs.contains_key(hash.as_str()) {
+                        continue;
+                    }
+                    if cloud_entry.archive_seq > 0 {
+                        missing_by_archive
+                            .entry(cloud_entry.archive_seq)
+                            .or_default()
+                            .push((hash.clone(), cloud_entry.relative_path.clone()));
+                    } else {
+                        // archive_seq == 0: individual upload mode blob
+                        missing_individual
+                            .push((hash.clone(), cloud_entry.relative_path.clone()));
+                    }
+                }
+
+                // Download archives
+                let mut downloaded_archives: std::collections::HashSet<u32> =
+                    std::collections::HashSet::new();
+                for (archive_seq, blobs) in &missing_by_archive {
+                    if downloaded_archives.contains(archive_seq) {
+                        // Already downloaded this archive, just extract needed blobs
+                        continue;
+                    }
+
+                    let archive_key = format!(
+                        "{}/blobs_archive_{:04}.zip.zst",
+                        Self::BLOBS_CLOUD_PREFIX, archive_seq
+                    );
+
+                    let mut last_err = String::new();
+                    let mut ok = false;
+                    for attempt in 0..Self::BLOB_MAX_RETRIES {
+                        let transfer_progress = Self::file_transfer_progress(
+                            progress.as_ref(),
+                            format!("Blob 归档下载 {}", archive_seq),
+                        );
+                        match storage.get(&archive_key).await {
+                            Ok(Some(archive_data)) => {
+                                // Decode payload (decrypt if needed)
+                                let decrypted = match self.decode_payload(&archive_data) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        last_err = format!("解密归档失败: {}", e);
+                                        break;
+                                    }
+                                };
+
+                                // Try zstd decompress first, fall back to raw zip
+                                let zip_data = zstd::stream::decode_all(std::io::Cursor::new(
+                                    &decrypted,
+                                ))
+                                .unwrap_or(decrypted);
+
+                                // Extract zip
+                                match Self::unpack_blobs_zip(&zip_data, blobs_dir) {
+                                    Ok(extracted) => {
+                                        // Verify each extracted blob's sha256
+                                        for path in &extracted {
+                                            // Calculate sha256 from filename (content-addressed)
+                                            let file_name = path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_default();
+                                            let hash = file_name.strip_suffix(".tmp").unwrap_or(
+                                                &file_name,
+                                            );
+
+                                            // Verify sha256
+                                            match crate::backup_common::calculate_file_hash(path) {
+                                                Ok(actual_hash) => {
+                                                    if actual_hash != hash {
+                                                        tracing::warn!(
+                                                            "[sync] blob sha256 校验失败: 期望={}, 实际={}",
+                                                            hash,
+                                                            actual_hash
+                                                        );
+                                                        let _ = std::fs::remove_file(path);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "[sync] blob sha256 计算失败: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        downloaded_count += blobs.len();
+                                        downloaded_archives.insert(*archive_seq);
+                                        downloaded_archive_count += 1;
+                                        ok = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        last_err = format!("解压归档失败: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                last_err = "归档文件不存在".to_string();
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = e.to_string();
+                                if attempt + 1 < Self::BLOB_MAX_RETRIES {
+                                    let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
+                                    tracing::warn!(
+                                        "[sync] blob 归档下载重试 {}/{}: seq={}: {}",
+                                        attempt + 1,
+                                        Self::BLOB_MAX_RETRIES,
+                                        archive_seq,
+                                        e
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    if !ok {
+                        tracing::error!(
+                            "[sync] blob 归档下载最终失败: seq={}: {}",
+                            archive_seq,
+                            last_err
+                        );
+                        for (hash, _) in blobs {
+                            download_failures.push(hash.clone());
+                        }
+                    }
+                }
+
+                // Download individual blobs (archive_seq == 0, legacy mode)
+                for (hash, relative_path) in &missing_individual {
+                    let dest = blobs_dir.join(relative_path);
+                    if let Some(parent) = dest.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let key = format!("{}/{}", Self::BLOBS_CLOUD_PREFIX, relative_path);
+
+                    let mut last_err = String::new();
+                    let mut ok = false;
+                    for attempt in 0..Self::BLOB_MAX_RETRIES {
+                        let transfer_progress = Self::file_transfer_progress(
+                            progress.as_ref(),
+                            format!("VFS blob {}", hash),
+                        );
+                        match storage
+                            .get_file(&key, &dest, Some(hash), transfer_progress)
+                            .await
+                        {
+                            Ok(_) => {
+                                downloaded_count += 1;
+                                ok = true;
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = e.to_string();
+                                let _ = std::fs::remove_file(&dest);
+                                if attempt + 1 < Self::BLOB_MAX_RETRIES {
+                                    let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
+                                    tracing::warn!(
+                                        "[sync] blob 下载重试 {}/{}: {}: {}",
+                                        attempt + 1,
+                                        Self::BLOB_MAX_RETRIES,
+                                        hash,
+                                        e
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    if !ok {
+                        tracing::error!("[sync] blob 下载最终失败: {}: {}", hash, last_err);
+                        download_failures.push(hash.clone());
+                    }
+                }
+            } else {
+                // Legacy mode: no archives, download individually
+                for (hash, cloud_entry) in &cloud_manifest.entries {
+                    if local_blobs.contains_key(hash.as_str()) {
+                        continue;
+                    }
+                    let dest = blobs_dir.join(&cloud_entry.relative_path);
+                    if let Some(parent) = dest.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let key = format!("{}/{}", Self::BLOBS_CLOUD_PREFIX, cloud_entry.relative_path);
+
+                    let mut last_err = String::new();
+                    let mut ok = false;
+                    for attempt in 0..Self::BLOB_MAX_RETRIES {
+                        let transfer_progress = Self::file_transfer_progress(
+                            progress.as_ref(),
+                            format!("VFS blob {}", hash),
+                        );
+                        match storage
+                            .get_file(&key, &dest, Some(hash), transfer_progress)
+                            .await
+                        {
+                            Ok(_) => {
+                                let actual_size =
+                                    std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                                if cloud_entry.size > 0 && actual_size != cloud_entry.size {
+                                    last_err = format!(
+                                        "blob 大小不匹配: 期望 {} 字节, 实际 {} 字节",
+                                        cloud_entry.size, actual_size
+                                    );
+                                    let _ = std::fs::remove_file(&dest);
+                                    if attempt + 1 < Self::BLOB_MAX_RETRIES {
+                                        let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
+                                        tracing::warn!(
+                                            "[sync] blob 大小校验失败，重试 {}/{}: {}: {}",
+                                            attempt + 1,
+                                            Self::BLOB_MAX_RETRIES,
+                                            hash,
+                                            last_err
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            delay,
+                                        ))
+                                        .await;
+                                    }
+                                    continue;
+                                }
+                                downloaded_count += 1;
+                                ok = true;
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = e.to_string();
+                                // 清理可能写到一半的文件
+                                let _ = std::fs::remove_file(&dest);
+                                if attempt + 1 < Self::BLOB_MAX_RETRIES {
+                                    let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
+                                    tracing::warn!(
+                                        "[sync] blob 下载重试 {}/{}: {}: {}",
+                                        attempt + 1,
+                                        Self::BLOB_MAX_RETRIES,
+                                        hash,
+                                        e
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    if !ok {
+                        tracing::error!("[sync] blob 下载最终失败: {}: {}", hash, last_err);
+                        download_failures.push(hash.clone());
+                    }
                 }
             }
         }
 
         if uploaded > 0 || downloaded_count > 0 {
             tracing::info!(
-                "[sync] blob 同步: 上传 {}, 下载 {}, 上传失败 {}, 下载失败 {}",
+                "[sync] blob 同步: 上传 {}, 下载 {}, 上传归档 {}, 下载归档 {}, 上传失败 {}, 下载失败 {}",
                 uploaded,
                 downloaded_count,
+                uploaded_archive_count,
+                downloaded_archive_count,
                 upload_failures.len(),
                 download_failures.len()
             );
         }
 
-        if uploaded > 0 {
+        if uploaded > 0 || downloaded_count > 0 {
             // [P2 D9-lite] 写前重新拉取最新清单做并集合并：blob 内容寻址（同 hash
             // 必同内容），并集天然无冲突；避免并发设备的新增条目被本设备覆盖丢失。
             let mut merged = match self.download_blobs_manifest(storage).await {
@@ -8379,6 +8876,12 @@ impl SyncManager {
                     .entries
                     .entry(hash.clone())
                     .or_insert_with(|| entry.clone());
+            }
+            // Merge archives (union by seq)
+            for archive in &new_manifest.archives {
+                if !merged.archives.iter().any(|a| a.seq == archive.seq) {
+                    merged.archives.push(archive.clone());
+                }
             }
             merged.updated_at = chrono::Utc::now().to_rfc3339();
             let json = serde_json::to_vec(&merged)
@@ -8396,6 +8899,8 @@ impl SyncManager {
             downloaded: downloaded_count,
             upload_failures,
             download_failures,
+            archives_uploaded: uploaded_archive_count,
+            archives_downloaded: downloaded_archive_count,
         })
     }
 
