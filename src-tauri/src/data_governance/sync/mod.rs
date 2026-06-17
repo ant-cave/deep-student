@@ -8209,8 +8209,12 @@ impl SyncManager {
     ///
     const BLOB_MAX_RETRIES: u32 = 3;
     const BLOB_RETRY_BASE_MS: u64 = 500;
-    /// 归档文件大小上限（100MB）
-    const ARCHIVE_MAX_SIZE: u64 = 100 * 1024 * 1024;
+    /// 归档文件大小上限（50MB）
+    const ARCHIVE_MAX_SIZE: u64 = 50 * 1024 * 1024;
+    /// 零散归档合并阈值：小归档大小（< 此值）且归档总数超过阈值时触发合并
+    const SMALL_ARCHIVE_THRESHOLD: u64 = 10 * 1024 * 1024;
+    /// 归档数量上限：超过此值时检查是否需要合并零散归档
+    const ARCHIVE_COUNT_MERGE_THRESHOLD: usize = 10;
     /// 小批量阈值：数量 < 此值且总大小 < 1MB 时回退到逐个上传
     const SMALL_BATCH_COUNT: usize = 3;
     const SMALL_BATCH_SIZE: u64 = 1024 * 1024;
@@ -8251,9 +8255,12 @@ impl SyncManager {
     }
 
     /// 解压 zip 归档到目标目录，返回成功解压的文件路径列表
+    ///
+    /// `skip_existing`: 若目标文件已存在则跳过（适用于内容寻址的 blob，同名即同内容）
     fn unpack_blobs_zip(
         data: &[u8],
         dest_dir: &std::path::Path,
+        skip_existing: bool,
     ) -> Result<Vec<std::path::PathBuf>, SyncError> {
         use std::io::{self, Cursor, Read};
 
@@ -8270,6 +8277,10 @@ impl SyncManager {
 
             let entry_name = file.name().to_string();
             let dest_path = dest_dir.join(&entry_name);
+
+            if skip_existing && dest_path.exists() {
+                continue;
+            }
 
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
@@ -8321,6 +8332,219 @@ impl SyncManager {
         }
 
         batches
+    }
+
+    /// 判断是否需要合并零散归档
+    /// 条件：归档数量超过阈值且存在小归档（< 10MB）
+    fn should_merge_archives(manifest: &BlobsManifest) -> bool {
+        if manifest.archives.len() <= Self::ARCHIVE_COUNT_MERGE_THRESHOLD {
+            return false;
+        }
+        manifest
+            .archives
+            .iter()
+            .any(|a| a.size < Self::SMALL_ARCHIVE_THRESHOLD)
+    }
+
+    /// 合并零散小归档为更大的归档（按 50MB 上限）
+    ///
+    /// 策略：
+    /// 1. 只合并本地已拥有全部 blob 的小归档（避免下载旧归档）
+    /// 2. 重新打包为新的归档并上传
+    /// 3. 更新 manifest（移除旧小归档条目，添加新归档）
+    ///
+    /// 返回实际合并的旧归档数量
+    async fn merge_small_archives(
+        &self,
+        storage: &dyn CloudStorage,
+        blobs_dir: &std::path::Path,
+        manifest: &mut BlobsManifest,
+        progress: Option<&FileTransferProgressCallback>,
+    ) -> Result<usize, SyncError> {
+        // 找出所有小归档
+        let small_archive_seqs: Vec<u32> = manifest
+            .archives
+            .iter()
+            .filter(|a| a.size < Self::SMALL_ARCHIVE_THRESHOLD)
+            .map(|a| a.seq)
+            .collect();
+
+        if small_archive_seqs.len() < 2 {
+            // 至少需要 2 个小归档才值得合并
+            return Ok(0);
+        }
+
+        // 按 archive_seq 分组收集属于小归档的 blob
+        let mut entries_by_archive: HashMap<u32, Vec<(String, BlobEntry)>> = HashMap::new();
+        for (hash, entry) in &manifest.entries {
+            if small_archive_seqs.contains(&entry.archive_seq) {
+                entries_by_archive
+                    .entry(entry.archive_seq)
+                    .or_default()
+                    .push((hash.clone(), entry.clone()));
+            }
+        }
+
+        // 检查本地是否拥有每个小归档的全部 blob
+        let mut mergeable_seqs: Vec<u32> = Vec::new();
+        for seq in &small_archive_seqs {
+            let entries = match entries_by_archive.get(seq) {
+                Some(e) => e,
+                None => continue,
+            };
+            let has_all_local = entries.iter().all(|(_, entry)| {
+                blobs_dir.join(&entry.relative_path).exists()
+            });
+            if has_all_local {
+                mergeable_seqs.push(*seq);
+            }
+        }
+
+        if mergeable_seqs.len() < 2 {
+            return Ok(0);
+        }
+
+        // 收集可合并的 blob 文件信息
+        let mut files_to_repack: Vec<(String, std::path::PathBuf, u64)> = Vec::new();
+        for (hash, entry) in &manifest.entries {
+            if mergeable_seqs.contains(&entry.archive_seq) {
+                let path = blobs_dir.join(&entry.relative_path);
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                files_to_repack.push((hash.clone(), path, size));
+            }
+        }
+
+        if files_to_repack.is_empty() {
+            return Ok(0);
+        }
+
+        // 按 50MB 上限重新分组
+        let batches = Self::split_into_archive_batches(&files_to_repack);
+        let next_seq = manifest
+            .archives
+            .iter()
+            .map(|a| a.seq)
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        let mut new_archives: Vec<ArchiveEntry> = Vec::new();
+        let mut merged_old_count = 0usize;
+
+        for (batch_idx, batch) in batches.into_iter().enumerate() {
+            let archive_seq = next_seq + batch_idx as u32;
+
+            // 打包 zip
+            let zip_data = match Self::pack_blobs_zip(&batch) {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::error!("[sync] 合并归档打包失败: {}", e);
+                    continue;
+                }
+            };
+
+            // zstd 压缩
+            let compressed = match zstd::stream::encode_all(std::io::Cursor::new(&zip_data), 0) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("[sync] 合并归档 zstd 压缩失败: {}", e);
+                    continue;
+                }
+            };
+
+            // 加密
+            let payload = match self.encode_payload(&compressed) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!("[sync] 合并归档加密失败: {}", e);
+                    continue;
+                }
+            };
+
+            // 上传新归档
+            let archive_key = format!(
+                "{}/blobs_archive_{:04}.zip.zst",
+                Self::BLOBS_CLOUD_PREFIX,
+                archive_seq
+            );
+
+            let mut last_err = String::new();
+            let mut ok = false;
+            for attempt in 0..Self::BLOB_MAX_RETRIES {
+                let transfer_progress = Self::file_transfer_progress(
+                    progress,
+                    format!("合并归档 {}", archive_seq),
+                );
+                match storage.put(&archive_key, &payload).await {
+                    Ok(_) => {
+                        use sha2::{Digest as Sha2Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(&payload);
+                        let archive_hash = format!("{:x}", hasher.finalize());
+
+                        new_archives.push(ArchiveEntry {
+                            seq: archive_seq,
+                            sha256: archive_hash,
+                            size: payload.len() as u64,
+                            blob_count: batch.len(),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        });
+
+                        // 更新 manifest entries 中这批 blob 的 archive_seq
+                        for (hash, path) in &batch {
+                            let relative = path
+                                .strip_prefix(blobs_dir)
+                                .unwrap_or(path)
+                                .to_string_lossy()
+                                .replace('\\', "/");
+                            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                            manifest.entries.insert(
+                                hash.clone(),
+                                BlobEntry {
+                                    relative_path: relative,
+                                    size,
+                                    updated_at: Self::file_mtime_rfc3339(path),
+                                    archive_seq,
+                                },
+                            );
+                        }
+
+                        ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = e.to_string();
+                        if attempt + 1 < Self::BLOB_MAX_RETRIES {
+                            let delay = Self::BLOB_RETRY_BASE_MS * (1u64 << attempt);
+                            tracing::warn!(
+                                "[sync] 合并归档上传重试 {}/{}: seq={}: {}",
+                                attempt + 1,
+                                Self::BLOB_MAX_RETRIES,
+                                archive_seq,
+                                e
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        }
+                    }
+                }
+            }
+            if !ok {
+                tracing::error!(
+                    "[sync] 合并归档上传最终失败: seq={}: {}",
+                    archive_seq,
+                    last_err
+                );
+            }
+        }
+
+        // 从 manifest 中移除已被合并的旧小归档，并追加新归档
+        if !new_archives.is_empty() {
+            manifest.archives.retain(|a| !mergeable_seqs.contains(&a.seq));
+            manifest.archives.extend(new_archives);
+            merged_old_count = mergeable_seqs.len();
+        }
+
+        Ok(merged_old_count)
     }
 
     /// 策略：
@@ -8576,6 +8800,32 @@ impl SyncManager {
         }
 
         // ===================================================================
+        // Merge small archives (before download phase)
+        // ===================================================================
+        if direction != SyncDirection::Download {
+            if Self::should_merge_archives(&new_manifest) {
+                match self
+                    .merge_small_archives(
+                        storage,
+                        blobs_dir,
+                        &mut new_manifest,
+                        progress.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(merged_count) => {
+                        if merged_count > 0 {
+                            tracing::info!("[sync] 合并了 {} 个零散归档", merged_count);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("[sync] 归档合并失败（跳过）: {}", e);
+                    }
+                }
+            }
+        }
+
+        // ===================================================================
         // Download phase
         // ===================================================================
         let mut downloaded_count = 0usize;
@@ -8644,8 +8894,8 @@ impl SyncManager {
                                 ))
                                 .unwrap_or(decrypted);
 
-                                // Extract zip
-                                match Self::unpack_blobs_zip(&zip_data, blobs_dir) {
+                                // Extract zip (skip existing blobs as they are content-addressed)
+                                match Self::unpack_blobs_zip(&zip_data, blobs_dir, true) {
                                     Ok(extracted) => {
                                         // Verify each extracted blob's sha256
                                         for path in &extracted {
