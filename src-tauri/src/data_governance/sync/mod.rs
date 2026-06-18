@@ -45,7 +45,7 @@ impl SyncManager {
         retry_async("上传统一清单", 2, || {
             let payload = payload.clone();
             async move {
-                storage.put("data_governance/sync_manifest.json", &payload).await
+                storage.put("data_governance/unified_manifest.json", &payload).await
                     .map_err(|e| SyncError::Network(format!("上传统一清单失败: {}", e)))
             }
         }).await?;
@@ -55,7 +55,7 @@ impl SyncManager {
     pub async fn download_unified_manifest(
         &self, storage: &dyn CloudStorage,
     ) -> Result<Option<UnifiedSyncManifest>, SyncError> {
-        let bytes = storage.get("data_governance/sync_manifest.json").await
+        let bytes = storage.get("data_governance/unified_manifest.json").await
             .map_err(|e| SyncError::Network(format!("下载统一清单失败: {}", e)))?;
         match bytes {
             Some(b) => {

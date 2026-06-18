@@ -8869,7 +8869,7 @@ impl SyncManager {
         })
     }
 
-    async fn download_assets_manifest(
+    pub(crate) async fn download_assets_manifest(
         &self,
         storage: &dyn CloudStorage,
     ) -> Result<AssetDirsManifest, SyncError> {
