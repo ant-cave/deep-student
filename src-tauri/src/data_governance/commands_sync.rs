@@ -741,6 +741,13 @@ async fn run_file_level_sync(
     let blobs_dir = active_dir.join("vfs_blobs");
     let total_steps = 3;
 
+    // [P1] 下载统一清单一次，供所有同步方法使用（省 2-5 GET）
+    use super::sync::{AssetDirsManifest, BlobsManifest, WorkspacesManifest};
+    let unified = manager.download_unified_manifest(storage).await.ok().flatten();
+    let ws_manifest: Option<WorkspacesManifest> = unified.as_ref().map(|u| u.workspaces.clone());
+    let blob_manifest: Option<BlobsManifest> = unified.as_ref().map(|u| u.blobs.clone());
+    let asset_manifest: Option<AssetDirsManifest> = unified.as_ref().map(|u| u.assets.clone());
+
     if let Some(progress) = progress {
         progress.emit(direction, 0, total_steps, "文件级同步：工作区数据库");
     }
@@ -756,17 +763,19 @@ async fn run_file_level_sync(
                 report.failed = true;
             }
         }
-        if let Err(e) = manager
-            .sync_workspace_databases_with_progress(
-                storage,
-                active_dir,
-                direction,
-                progress.map(|progress| {
-                    progress.transfer_callback(direction, 0, total_steps, "文件级传输")
-                }),
-            )
-            .await
-        {
+        let ws_cb = progress.map(|p| {
+            p.transfer_callback(direction, 0, total_steps, "文件级传输")
+        });
+        let ws_result = if let Some(ref m) = ws_manifest {
+            manager.sync_workspace_databases_with_manifest(
+                storage, active_dir, direction, ws_cb, m.clone()
+            ).await
+        } else {
+            manager.sync_workspace_databases_with_progress(
+                storage, active_dir, direction, ws_cb
+            ).await
+        };
+        if let Err(e) = ws_result {
             let msg = format!("工作区数据库同步失败: {}", e);
             warn!("[data_governance] {}", msg);
             append_warning_message(&mut report.warning, msg);
@@ -784,17 +793,19 @@ async fn run_file_level_sync(
             report.failed = true;
         }
     }
-    match manager
-        .sync_vfs_blobs_with_tombstones_and_progress(
-            storage,
-            &blobs_dir,
-            direction,
-            progress.map(|progress| {
-                progress.transfer_callback(direction, 1, total_steps, "文件级传输")
-            }),
-        )
-        .await
-    {
+    let blob_cb = progress.map(|p| {
+        p.transfer_callback(direction, 1, total_steps, "文件级传输")
+    });
+    let blob_result = if let Some(ref m) = blob_manifest {
+        manager.sync_vfs_blobs_with_tombstones_and_progress_with_manifest(
+            storage, &blobs_dir, direction, blob_cb, m.clone()
+        ).await
+    } else {
+        manager.sync_vfs_blobs_with_tombstones_and_progress(
+            storage, &blobs_dir, direction, blob_cb
+        ).await
+    };
+    match blob_result {
         Ok(outcome) => {
             if outcome.has_failures() {
                 if let Some(msg) = outcome.failure_summary() {
@@ -822,18 +833,19 @@ async fn run_file_level_sync(
             report.failed = true;
         }
     }
-    match manager
-        .sync_asset_directories_with_tombstones_and_progress(
-            storage,
-            active_dir,
-            app_data_dir,
-            direction,
-            progress.map(|progress| {
-                progress.transfer_callback(direction, 2, total_steps, "文件级传输")
-            }),
-        )
-        .await
-    {
+    let asset_cb = progress.map(|p| {
+        p.transfer_callback(direction, 2, total_steps, "文件级传输")
+    });
+    let asset_result = if let Some(ref m) = asset_manifest {
+        manager.sync_asset_directories_with_tombstones_and_progress_with_manifest(
+            storage, active_dir, app_data_dir, direction, asset_cb, m.clone()
+        ).await
+    } else {
+        manager.sync_asset_directories_with_tombstones_and_progress(
+            storage, active_dir, app_data_dir, direction, asset_cb
+        ).await
+    };
+    match asset_result {
         Ok(outcome) => {
             if outcome.has_failures() {
                 if let Some(msg) = outcome.failure_summary() {
@@ -852,6 +864,39 @@ async fn run_file_level_sync(
     }
     if let Some(progress) = progress {
         progress.emit(direction, 3, total_steps, "文件级同步完成");
+    }
+
+    // 同步完成后构建并上传统一清单（供下次同步使用）
+    if direction != SyncDirection::Download {
+        let (workspaces, blobs, assets) = if unified.is_some() {
+            // 已有统一清单：重新拉取最新版（1 GET），合并本次同步的改动
+            match manager.download_unified_manifest(storage).await {
+                Ok(Some(u)) => (u.workspaces, u.blobs, u.assets),
+                _ => (
+                    crate::data_governance::sync::WorkspacesManifest::default(),
+                    crate::data_governance::sync::BlobsManifest::default(),
+                    crate::data_governance::sync::AssetDirsManifest::default(),
+                ),
+            }
+        } else {
+            // 首次同步：下载独立清单构建统一清单（3 GET，一次性成本）
+            (
+                manager.download_workspaces_manifest(storage).await.unwrap_or_default(),
+                manager.download_blobs_manifest(storage).await.unwrap_or_default(),
+                manager.download_assets_manifest(storage).await.unwrap_or_default(),
+            )
+        };
+        let unified = crate::data_governance::sync::UnifiedSyncManifest {
+            format_version: 3,
+            device_id: manager.device_id().to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            workspaces, blobs, assets,
+            changes_meta: std::collections::HashMap::new(),
+            blob_tombstones_raw: None,
+            asset_tombstones_raw: None,
+            snapshot_seen: std::collections::HashMap::new(),
+        };
+        let _ = manager.upload_unified_manifest(storage, &unified).await;
     }
 
     report

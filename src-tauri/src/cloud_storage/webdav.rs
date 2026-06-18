@@ -24,6 +24,14 @@ use super::traits::{
 use crate::backup_common::calculate_file_hash;
 use crate::models::AppError;
 
+/// [P6] 全局 MKCOL 缓存，跨 WebDavStorage 实例共享
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+fn confirmed_dirs() -> &'static Mutex<HashSet<String>> {
+    static DIRS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    DIRS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 /// WebDAV 存储实现
 pub struct WebDavStorage {
     base_url: Url,
@@ -310,6 +318,14 @@ impl WebDavStorage {
 
     /// 确保目录存在（递归创建）
     async fn ensure_directory(&self, path: &str) -> Result<()> {
+        // [P6] MKCOL 缓存：已确认的目录直接跳过（全局共享，跨实例）
+        {
+            let confirmed = confirmed_dirs().lock().unwrap();
+            if confirmed.contains(path) {
+                return Ok(());
+            }
+        }
+
         let parts: Vec<&str> = path
             .trim_matches('/')
             .split('/')
@@ -317,6 +333,7 @@ impl WebDavStorage {
             .collect();
 
         let mut current = String::new();
+        let mut all_confirmed = true;
         for part in parts {
             if !current.is_empty() {
                 current.push('/');
@@ -336,9 +353,13 @@ impl WebDavStorage {
                     | StatusCode::METHOD_NOT_ALLOWED
                     | StatusCode::CONFLICT
             ) {
-                // 不是致命错误，目录可能已存在
+                all_confirmed = false;
                 tracing::debug!("WebDAV MKCOL {} 返回 {}", current, res.status());
             }
+        }
+        // 全部子目录创建成功（或已存在）后，缓存整个路径
+        if all_confirmed {
+            confirmed_dirs().lock().unwrap().insert(path.to_string());
         }
         Ok(())
     }
@@ -692,14 +713,10 @@ impl CloudStorage for WebDavStorage {
         expected_checksum: Option<&str>,
         progress: Option<DownloadProgressCallback>,
     ) -> Result<String> {
-        let info = self
-            .stat(key)
-            .await?
-            .ok_or_else(|| AppError::not_found("云端文件不存在"))?;
-        let total_size = info.size;
+        // [P6] 直接 GET，不再先 stat 预检（省 1 次 PROPFIND/文件）
         let progress: Option<Arc<DownloadProgressCallback>> = progress.map(Arc::from);
         if let Some(cb) = progress.as_ref() {
-            cb(0, total_size);
+            cb(0, 0);
         }
 
         let res = self.request(Method::GET, key, None).await?;
@@ -750,7 +767,7 @@ impl CloudStorage for WebDavStorage {
                 hasher.update(&bytes);
                 downloaded += bytes.len() as u64;
                 if let Some(cb) = progress.as_ref() {
-                    cb(downloaded, total_size);
+                    cb(downloaded, downloaded);
                 }
             }
             file.flush()
