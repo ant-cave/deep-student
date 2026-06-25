@@ -752,18 +752,21 @@ impl CloudStorage for FtpStorage {
                 let full_dir = Self::join_paths(&self.root, &relative_dir);
                 let full_dir_abs = Self::absolute_path(&full_dir);
                 let raw_entries = match client.mlsd(Some(&full_dir_abs)).await {
-                    Ok(entries) => entries,
-                    Err(mlsd_err) => {
-                        if Self::is_not_found_error(&mlsd_err) {
-                            continue;
-                        }
+                    Ok(entries) if !entries.is_empty() => entries,
+                    Ok(_) | Err(_) => {
+                        // mlsd 返回空列表或报错时，fallback 到 list 命令。
+                        // 某些 FTP 服务器首次连接后 mlsd 缓存未就绪会返回空结果。
                         match client.list(Some(&full_dir_abs)).await {
-                            Ok(entries) => entries,
+                            Ok(entries) if !entries.is_empty() => entries,
+                            Ok(_) => {
+                                tracing::debug!("[FtpStorage] LIST 返回空结果: {}", full_dir_abs);
+                                continue;
+                            }
                             Err(list_err) => {
                                 if Self::is_not_found_error(&list_err) {
                                     continue;
                                 }
-                                return Err(mlsd_err);
+                                return Err(list_err);
                             }
                         }
                     }
