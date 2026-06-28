@@ -37,6 +37,8 @@ export interface VendorSettingsContextValue {
 
   // --- 操作 ---
   handleOpenVendorModal: (vendor?: VendorConfig | null) => void;
+  handleAddNewVendor: () => void;
+  isNewVendor: boolean;
   handleStartEditVendor: (vendor: VendorConfig) => void;
   handleCancelEditVendor: () => void;
   handleSaveEditVendor: () => void;

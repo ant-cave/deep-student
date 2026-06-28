@@ -93,6 +93,7 @@ devsec/
 *.njsproj
 *.sln
 *.sw?
+mcp-config.json
 
 # Android SDK and build files
 AndroidSDK/

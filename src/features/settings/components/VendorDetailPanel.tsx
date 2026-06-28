@@ -12,6 +12,7 @@ import { Textarea } from '@/components/ui/shad/Textarea';
 import { Label } from '@/components/ui/shad/Label';
 import { Badge } from '@/components/ui/shad/Badge';
 import { Switch } from '@/components/ui/shad/Switch';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/shad/Select';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/shad/Sheet';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/shad/Dialog';
 import { CustomScrollArea } from '@/components/custom-scroll-area';
@@ -34,6 +35,24 @@ import { useVendorSettings } from './VendorSettingsContext';
 import { convertProfileToApiConfig } from './modelConverters';
 import { groupByModelFamily } from './modelFamily';
 import type { VendorConfig } from '@/types';
+
+const providerTypeOptions = [
+  { value: 'custom', labelKey: 'settings:vendor_modal.providers.custom', defaultLabel: 'Custom' },
+  { value: 'openai', labelKey: 'settings:vendor_modal.providers.openai', defaultLabel: 'OpenAI' },
+  { value: 'deepseek', labelKey: 'settings:vendor_modal.providers.deepseek', defaultLabel: 'DeepSeek' },
+  { value: 'anthropic', labelKey: 'settings:vendor_modal.providers.anthropic', defaultLabel: 'Anthropic' },
+  { value: 'google', labelKey: 'settings:vendor_modal.providers.google', defaultLabel: 'Google' },
+  { value: 'general', labelKey: 'settings:vendor_modal.providers.general', defaultLabel: 'General Adapter' },
+  { value: 'siliconflow', labelKey: 'settings:vendor_modal.providers.siliconflow', defaultLabel: 'SiliconFlow' },
+  { value: 'qwen', labelKey: 'settings:vendor_modal.providers.qwen', defaultLabel: 'Qwen' },
+  { value: 'zhipu', labelKey: 'settings:vendor_modal.providers.zhipu', defaultLabel: 'Zhipu' },
+  { value: 'doubao', labelKey: 'settings:vendor_modal.providers.doubao', defaultLabel: 'Doubao' },
+  { value: 'minimax', labelKey: 'settings:vendor_modal.providers.minimax', defaultLabel: 'MiniMax' },
+  { value: 'moonshot', labelKey: 'settings:vendor_modal.providers.moonshot', defaultLabel: 'Moonshot' },
+  { value: 'nvidia', labelKey: 'settings:vendor_modal.providers.nvidia', defaultLabel: 'NVIDIA' },
+  { value: 'mimo', labelKey: 'settings:vendor_modal.providers.mimo', defaultLabel: 'Xiaomi MiMo' },
+  { value: 'ollama', labelKey: 'settings:vendor_modal.providers.ollama', defaultLabel: 'Ollama' },
+];
 
 // --- Save Status Indicator ---
 type SaveStatus = 'idle' | 'saving' | 'saved';
@@ -109,6 +128,7 @@ export const VendorDetailPanel: React.FC = () => {
     vendorBusy,
     vendorSaving,
     isEditingVendor,
+    isNewVendor,
     vendorFormData,
     setVendorFormData,
     testingApi,
@@ -137,6 +157,33 @@ export const VendorDetailPanel: React.FC = () => {
     triggerPostSaveAutoFlow,
     isSmallScreen,
   } = useVendorSettings();
+
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  // 新建供应商时，滚动到名称输入框并聚焦
+  useEffect(() => {
+    if (isNewVendor && isEditingVendor && nameInputRef.current) {
+      const timer = setTimeout(() => {
+        const el = nameInputRef.current;
+        if (!el) return;
+        // 优先滚动最近的滚动父容器（适配移动端 Sheet 内部滚动）
+        let scrollParent: HTMLElement | null = el.parentElement;
+        while (scrollParent) {
+          const style = window.getComputedStyle(scrollParent);
+          if (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflow === 'auto' || style.overflow === 'scroll') {
+            scrollParent.scrollTo({ top: el.offsetTop - scrollParent.offsetTop - 80, behavior: 'smooth' });
+            break;
+          }
+          scrollParent = scrollParent.parentElement;
+        }
+        // 兜底：scrollIntoView
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        el.focus();
+        el.select();
+      }, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [isNewVendor, isEditingVendor]);
 
   const [baseUrlDraft, setBaseUrlDraft] = useState('');
   const [baseUrlSaveStatus, setBaseUrlSaveStatus] = useState<SaveStatus>('idle');
@@ -385,7 +432,22 @@ export const VendorDetailPanel: React.FC = () => {
           <div className="flex flex-col gap-6 text-sm md:grid md:grid-cols-2">
             <div className="md:col-span-2 space-y-2">
               <Label className="text-xs font-medium text-muted-foreground">{t('settings:vendor_modal.name_label')}</Label>
-              <Input value={vendorFormData.name || ''} onChange={e => setVendorFormData(prev => ({ ...prev, name: e.target.value }))} placeholder={t('settings:vendor_modal.name_placeholder')} />
+              <Input ref={nameInputRef} value={vendorFormData.name || ''} onChange={e => setVendorFormData(prev => ({ ...prev, name: e.target.value }))} placeholder={t('settings:vendor_modal.name_placeholder')} />
+            </div>
+            <div className="md:col-span-2 space-y-2">
+              <Label className="text-xs font-medium text-muted-foreground">{t('settings:vendor_modal.provider_label')}</Label>
+              <Select value={vendorFormData.providerType || 'custom'} onValueChange={(val) => setVendorFormData(prev => ({ ...prev, providerType: val }))}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {providerTypeOptions.map(option => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {t(option.labelKey, { defaultValue: option.defaultLabel })}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="md:col-span-2 space-y-2">
               <Label className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
@@ -394,6 +456,25 @@ export const VendorDetailPanel: React.FC = () => {
               </Label>
               <Input value={vendorFormData.baseUrl || ''} onChange={e => setVendorFormData(prev => ({ ...prev, baseUrl: e.target.value }))} placeholder="https://api.openai.com/v1" className="font-mono" />
             </div>
+            {!selectedVendor?.isBuiltin && (
+              <div className="md:col-span-2 flex items-center justify-between rounded-lg border border-border/40 px-3 py-2.5">
+                <div className="flex items-center gap-2">
+                  <Prohibit className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                  <div className="space-y-0.5">
+                    <Label className="text-sm font-normal leading-none cursor-pointer">
+                      {t('settings:vendor_modal.no_api_key_label', { defaultValue: '无需 API Key' })}
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      {t('settings:vendor_modal.no_api_key_desc', { defaultValue: '适用于自搭建后端（Ollama / vLLM / llama.cpp 等）' })}
+                    </p>
+                  </div>
+                </div>
+                <Switch
+                  checked={vendorFormData.noApiKey ?? false}
+                  onCheckedChange={(checked) => setVendorFormData(prev => ({ ...prev, noApiKey: checked }))}
+                />
+              </div>
+            )}
             <div className="md:col-span-2 space-y-2">
               <Label className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                 <NotePencil className="h-3.5 w-3.5" aria-hidden="true" />

@@ -31,10 +31,12 @@ interface ApisTabProps {
   vendorBusy: boolean;
   vendorSaving: boolean;
   isEditingVendor: boolean;
+  isNewVendor: boolean;
   vendorFormData: Partial<VendorConfig>;
   setVendorFormData: React.Dispatch<React.SetStateAction<Partial<VendorConfig>>>;
   testingApi: string | null;
   handleOpenVendorModal: (vendor?: VendorConfig | null) => void;
+  handleAddNewVendor: () => void;
   handleStartEditVendor: (vendor: VendorConfig) => void;
   handleCancelEditVendor: () => void;
   handleSaveEditVendor: () => void;
@@ -79,6 +81,7 @@ export const ApisTab: React.FC<ApisTabProps> = (props) => {
     vendorBusy: props.vendorBusy,
     vendorSaving: props.vendorSaving,
     isEditingVendor: props.isEditingVendor,
+    isNewVendor: props.isNewVendor,
     vendorFormData: props.vendorFormData,
     setVendorFormData: props.setVendorFormData,
     testingApi: props.testingApi,
@@ -87,6 +90,7 @@ export const ApisTab: React.FC<ApisTabProps> = (props) => {
     isAddingNewModel: props.isAddingNewModel,
     isSmallScreen: props.isSmallScreen ?? false,
     handleOpenVendorModal: props.handleOpenVendorModal,
+    handleAddNewVendor: props.handleAddNewVendor,
     handleStartEditVendor: props.handleStartEditVendor,
     handleCancelEditVendor: props.handleCancelEditVendor,
     handleSaveEditVendor: props.handleSaveEditVendor,

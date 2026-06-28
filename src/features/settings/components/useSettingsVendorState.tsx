@@ -35,6 +35,7 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
   const [vendorModalOpen, setVendorModalOpen] = useState(false);
   const [editingVendor, setEditingVendor] = useState<VendorConfig | null>(null);
   const [isEditingVendor, setIsEditingVendor] = useState(false);
+  const [isNewVendor, setIsNewVendor] = useState(false);
   const [vendorFormData, setVendorFormData] = useState<Partial<VendorConfig>>({});
   const [modelEditor, setModelEditor] = useState<{ vendor: VendorConfig; profile?: ModelProfile; api: ApiConfig } | null>(null);
   // 内联编辑状态（用于卡片展开编辑）
@@ -289,6 +290,35 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
     }
   };
 
+  const handleAddNewVendor = useCallback(async () => {
+    const newVendor: VendorConfig = {
+      id: '',
+      name: t('settings:vendor_panel.new_vendor_name', { defaultValue: '新供应商' }),
+      providerType: 'custom',
+      apiProtocol: 'openai_chat_completions',
+      supportsOpenAIResponses: false,
+      baseUrl: '',
+      apiKey: '',
+      headers: {},
+      isBuiltin: false,
+      isReadOnly: false,
+    };
+    try {
+      const saved = await upsertVendor(newVendor);
+      setIsNewVendor(true);
+      setSelectedVendorId(saved.id);
+      setVendorFormData({
+        ...saved,
+        headers: saved.headers || {},
+      });
+      setIsEditingVendor(true);
+      showGlobalNotification('success', t('settings:notifications.vendor_created', { defaultValue: '供应商已创建' }));
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      showGlobalNotification('error', t('settings:notifications.vendor_save_failed', { error: errorMessage }));
+    }
+  }, [upsertVendor, t]);
+
   const handleStartEditVendor = (vendor: VendorConfig) => {
     setVendorFormData({
       ...vendor,
@@ -299,6 +329,7 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
 
   const handleCancelEditVendor = () => {
     setIsEditingVendor(false);
+    setIsNewVendor(false);
     setVendorFormData({});
   };
 
@@ -319,6 +350,7 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
         id: selectedVendor!.id,
       } as VendorConfig);
       setIsEditingVendor(false);
+      setIsNewVendor(false);
       setVendorFormData({});
       setSelectedVendorId(saved.id);
       showGlobalNotification('success', t('common:config_saved'));
@@ -1059,5 +1091,5 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
     return sensitivePatterns.some(pattern => key.includes(pattern));
   };
 
-  return { selectedVendorId, setSelectedVendorId, vendorModalOpen, setVendorModalOpen, editingVendor, setEditingVendor, isEditingVendor, vendorFormData, setVendorFormData, modelEditor, setModelEditor, inlineEditState, setInlineEditState, isAddingNewModel, setIsAddingNewModel, modelDeleteDialog, setModelDeleteDialog, vendorDeleteDialog, setVendorDeleteDialog, testingApi, vendorBusy, sortedVendors, selectedVendor, selectedVendorModels, profileCountByVendor, selectedVendorIsSiliconflow, testApiConnection, handleOpenVendorModal, handleStartEditVendor, handleCancelEditVendor, handleSaveEditVendor, handleSaveVendorModal, handleDeleteVendor, handleSaveVendorApiKey, handleSaveVendorBaseUrl, handleReorderVendors, confirmDeleteVendor, handleOpenModelEditor, handleSaveModelProfile, handleSaveInlineEdit, handleAddModelInline, handleCloseModelEditor, handleSaveModelProfileAndClose, handleDeleteModelProfile, confirmDeleteModelProfile, handleToggleModelProfile, handleToggleFavorite, handleSiliconFlowConfig, handleAddVendorModels, getAllEnabledApis, getEmbeddingApis, getRerankerApis, getAsrApis, getImageGenerationApis, toUnifiedModelInfo, handleBatchCreateConfigs, handleApplyPreset, handleBatchConfigsCreated, handleClearVendorApiKey, triggerPostSaveAutoFlow, isSensitiveKey, maskApiKey, apiConfigsForApisTab };
+  return { selectedVendorId, setSelectedVendorId, vendorModalOpen, setVendorModalOpen, editingVendor, setEditingVendor, isEditingVendor, isNewVendor, setIsNewVendor, vendorFormData, setVendorFormData, modelEditor, setModelEditor, inlineEditState, setInlineEditState, isAddingNewModel, setIsAddingNewModel, modelDeleteDialog, setModelDeleteDialog, vendorDeleteDialog, setVendorDeleteDialog, testingApi, vendorBusy, sortedVendors, selectedVendor, selectedVendorModels, profileCountByVendor, selectedVendorIsSiliconflow, testApiConnection, handleOpenVendorModal, handleAddNewVendor, handleStartEditVendor, handleCancelEditVendor, handleSaveEditVendor, handleSaveVendorModal, handleDeleteVendor, handleSaveVendorApiKey, handleSaveVendorBaseUrl, handleReorderVendors, confirmDeleteVendor, handleOpenModelEditor, handleSaveModelProfile, handleSaveInlineEdit, handleAddModelInline, handleCloseModelEditor, handleSaveModelProfileAndClose, handleDeleteModelProfile, confirmDeleteModelProfile, handleToggleModelProfile, handleToggleFavorite, handleSiliconFlowConfig, handleAddVendorModels, getAllEnabledApis, getEmbeddingApis, getRerankerApis, getAsrApis, getImageGenerationApis, toUnifiedModelInfo, handleBatchCreateConfigs, handleApplyPreset, handleBatchConfigsCreated, handleClearVendorApiKey, triggerPostSaveAutoFlow, isSensitiveKey, maskApiKey, apiConfigsForApisTab };
 }

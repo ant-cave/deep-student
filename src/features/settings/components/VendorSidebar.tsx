@@ -120,7 +120,7 @@ export const VendorSidebar: React.FC = () => {
     setSelectedVendorId,
     profileCountByVendor,
     vendorBusy,
-    handleOpenVendorModal,
+    handleAddNewVendor,
     onReorderVendors,
   } = useVendorSettings();
 
@@ -219,7 +219,7 @@ export const VendorSidebar: React.FC = () => {
             variant="ghost"
             size="sm"
             iconOnly
-            onClick={() => handleOpenVendorModal(null)}
+            onClick={handleAddNewVendor}
             title={t('settings:vendor_panel.add_vendor_button')}
             aria-label={t('settings:vendor_panel.add_vendor_button')}
           >
