@@ -263,7 +263,13 @@ export async function autoPostSaveFlow(
 
   // 1. 解析 API Key
   const resolvedKey = await resolveApiKey(vendor);
-  // noApiKey 供应商返回空字符串（而非 null），允许无 Key 获取模型
+  // noApiKey 供应商：不自动获取模型（通常无认证，无法可靠获取列表）
+  if (vendor.noApiKey) {
+    console.log(
+      `[autoPostSaveFlow] Vendor ${vendor.id} (${vendor.name}) has noApiKey enabled, skipping auto-fetch.`
+    );
+    return;
+  }
   if (resolvedKey === null) {
     console.warn(
       `[autoPostSaveFlow] Cannot resolve API key for vendor ${vendor.id} (${vendor.name}), skipping auto-fetch.`

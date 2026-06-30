@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TauriAPI } from '../utils/tauriApi';
 import type { VendorConfig, ModelProfile, ApiConfig, ModelAssignments } from '../types';
 import { getErrorMessage } from '../utils/errorUtils';
@@ -150,12 +150,21 @@ export const useVendorModels = () => {
     }
   }, []);
 
+  // 标记由本 hook 自身发起的变更事件，避免 reload 覆盖刚刚写入的状态
+  const skipNextReloadRef = useRef(false);
+
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
 
   useEffect(() => {
     const reload = () => {
+      // 跳过自身写入后触发的 reload：状态已通过 setVendors 更新，重读会导致
+      // loadAll（async）在后续 microtask 中覆盖刚刚写入的数据（竞态条件）
+      if (skipNextReloadRef.current) {
+        skipNextReloadRef.current = false;
+        return;
+      }
       void loadAll();
     };
     window.addEventListener('api_configurations_changed', reload as EventListener);
@@ -207,6 +216,7 @@ export const useVendorModels = () => {
       try {
         await TauriAPI.saveVendorConfigs(next);
         setVendors(next);
+        skipNextReloadRef.current = true;
         dispatchVendorModelChange(next, modelProfiles);
         setError(null);
       } catch (err: unknown) {
@@ -226,6 +236,7 @@ export const useVendorModels = () => {
       try {
         await TauriAPI.saveModelProfiles(next);
         setModelProfiles(next);
+        skipNextReloadRef.current = true;
         dispatchVendorModelChange(vendors, next);
         setError(null);
       } catch (err: unknown) {

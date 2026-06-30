@@ -137,6 +137,7 @@ export const VendorDetailPanel: React.FC = () => {
     handleSaveEditVendor,
     handleDeleteVendor,
     handleSaveVendorBaseUrl,
+    handleToggleVendorNoApiKey,
     handleSaveVendorApiKey,
     handleClearVendorApiKey,
     handleOpenModelEditor,
@@ -454,7 +455,7 @@ export const VendorDetailPanel: React.FC = () => {
                 <LinkSimple className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>{t('settings:vendor_modal.base_url_label')}</span>
               </Label>
-              <Input value={vendorFormData.baseUrl || ''} onChange={e => setVendorFormData(prev => ({ ...prev, baseUrl: e.target.value }))} placeholder="https://api.openai.com/v1" className="font-mono" />
+              <Input value={vendorFormData.baseUrl || ''} onChange={e => setVendorFormData(prev => ({ ...prev, baseUrl: e.target.value }))} placeholder="https://api.openai.com/v1" className="font-mono" disabled={selectedVendor?.isBuiltin} />
             </div>
             {!selectedVendor?.isBuiltin && (
               <div className="md:col-span-2 flex items-center justify-between rounded-lg border border-border/40 px-3 py-2.5">
@@ -547,9 +548,36 @@ export const VendorDetailPanel: React.FC = () => {
                       onBlur={handleBaseUrlSave}
                       placeholder="https://api.openai.com/v1"
                       className="font-mono bg-muted/30 border-transparent focus:bg-muted/20 focus-visible:ring-0 focus-visible:ring-offset-0 transition-colors"
-                      disabled={vendorBusy}
+                      disabled={vendorBusy || selectedVendor?.isBuiltin}
                     />
+                    {selectedVendor?.isBuiltin && (
+                      <p className="text-xs text-muted-foreground/60">
+                        {t('settings:vendor_panel.builtin_base_url_readonly', { defaultValue: '内置供应商接口地址不可修改' })}
+                      </p>
+                    )}
                   </div>
+
+                  {/* 无需 API Key（仅非内置、非 SiliconFlow 供应商可切换） */}
+                  {!selectedVendor?.isBuiltin && !selectedVendorIsSiliconflow && (
+                    <div className="flex items-center justify-between rounded-lg border border-border/40 px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <Prohibit className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                        <div className="space-y-0.5">
+                          <Label className="text-sm font-normal leading-none cursor-pointer">
+                            {t('settings:vendor_modal.no_api_key_label', { defaultValue: '无需 API Key' })}
+                          </Label>
+                          <p className="text-xs text-muted-foreground">
+                            {t('settings:vendor_modal.no_api_key_desc', { defaultValue: '适用于自搭建后端（Ollama / vLLM / llama.cpp 等）' })}
+                          </p>
+                        </div>
+                      </div>
+                      <Switch
+                        id="vendor-no-api-key-view"
+                        checked={selectedVendor.noApiKey ?? false}
+                        onCheckedChange={(checked) => handleToggleVendorNoApiKey(selectedVendor!.id, checked)}
+                      />
+                    </div>
+                  )}
 
                   {/* API Key */}
                   <div className="space-y-1.5">

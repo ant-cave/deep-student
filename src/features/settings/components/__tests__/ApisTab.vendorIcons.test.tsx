@@ -74,6 +74,7 @@ const renderApisTab = (sortedVendors: VendorConfig[], options: RenderApisTabOpti
       handleSaveEditVendor={noop}
       handleDeleteVendor={noop}
       handleSaveVendorBaseUrl={noop}
+      handleToggleVendorNoApiKey={noop}
       handleSaveVendorApiKey={noop}
       handleClearVendorApiKey={noop}
       handleOpenModelEditor={noop}

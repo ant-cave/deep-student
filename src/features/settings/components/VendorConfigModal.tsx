@@ -285,6 +285,7 @@ export const VendorConfigModal = forwardRef<VendorConfigModalRef, VendorConfigMo
           onChange={e => setFormData(prev => ({ ...prev, baseUrl: e.target.value }))}
           placeholder="https://api.openai.com/v1"
           className="mt-2 font-mono"
+          disabled={formData.isBuiltin}
         />
       </div>
       {/* 无需密钥（自搭建后端） */}

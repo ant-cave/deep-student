@@ -71,6 +71,8 @@ export const initPlatformClasses = (): void => {
     html.classList.add('is-android');
     // 初始化 Android 安全区域 CSS 变量
     initAndroidSafeArea();
+    // 初始化键盘状态监听
+    initAndroidKeyboardDetection();
   }
 
   // 桌面平台检测
@@ -95,6 +97,48 @@ declare global {
     __DEEP_STUDENT_PENDING_SAFE_AREA__?: number[];
   }
 }
+
+/**
+ * 初始化 Android 键盘弹出/收起状态检测
+ * 使用 visualViewport API 监听键盘状态，给 html 添加/移除 keyboard-shown class
+ */
+const initAndroidKeyboardDetection = (): void => {
+  if (typeof window === 'undefined') return;
+  const visualViewport = window.visualViewport;
+  if (!visualViewport) return;
+
+  const KEYBOARD_THRESHOLD = 150;
+  const ORIENTATION_NOISE_THRESHOLD = 50;
+  let initialHeight = visualViewport.height;
+  let initialWidth = window.innerWidth;
+
+  const handleResize = () => {
+    const html = document.documentElement;
+    const heightDiff = initialHeight - visualViewport.height;
+    const widthChanged = Math.abs(window.innerWidth - initialWidth) > ORIENTATION_NOISE_THRESHOLD;
+
+    // 屏幕旋转：重置基准高度
+    if (widthChanged) {
+      html.classList.remove('keyboard-shown');
+      initialHeight = visualViewport.height;
+      initialWidth = window.innerWidth;
+      return;
+    }
+
+    if (heightDiff > KEYBOARD_THRESHOLD) {
+      // 键盘弹出
+      html.classList.add('keyboard-shown');
+    } else if (heightDiff < 20) {
+      // 键盘收起或中间态：重置状态
+      html.classList.remove('keyboard-shown');
+      if (heightDiff < -KEYBOARD_THRESHOLD) {
+        initialHeight = visualViewport.height;
+      }
+    }
+  };
+
+  visualViewport.addEventListener('resize', handleResize);
+};
 
 /**
  * Android 安全区域初始化（SA-1 升级：固定 fallback + 原生真实 inset 注入）
