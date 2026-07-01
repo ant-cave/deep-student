@@ -32,7 +32,7 @@ import { VendorApiKeySection } from './VendorApiKeySection';
 import { VendorModelFetcher, supportsModelFetching } from './VendorModelFetcher';
 import { ShadApiEditModal } from './ShadApiEditModal';
 import { useVendorSettings } from './VendorSettingsContext';
-import { convertProfileToApiConfig } from './modelConverters';
+import { convertProfileToApiConfig, defaultApiProtocolForProvider, getAllowedApiProtocolsForProviderType, normalizeApiProtocolForProviderType } from './modelConverters';
 import { groupByModelFamily } from './modelFamily';
 import type { VendorConfig } from '@/types';
 
@@ -138,6 +138,7 @@ export const VendorDetailPanel: React.FC = () => {
     handleDeleteVendor,
     handleSaveVendorBaseUrl,
     handleToggleVendorNoApiKey,
+    handleSaveVendorApiProtocol,
     handleSaveVendorApiKey,
     handleClearVendorApiKey,
     handleOpenModelEditor,
@@ -160,28 +161,31 @@ export const VendorDetailPanel: React.FC = () => {
   } = useVendorSettings();
 
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const connectionSectionRef = useRef<HTMLDivElement>(null);
 
-  // 新建供应商时，滚动到名称输入框并聚焦
+  // 新建供应商时，滚动到连接配置区并聚焦名称输入框
   useEffect(() => {
-    if (isNewVendor && isEditingVendor && nameInputRef.current) {
+    if (isNewVendor && isEditingVendor) {
       const timer = setTimeout(() => {
-        const el = nameInputRef.current;
-        if (!el) return;
-        // 优先滚动最近的滚动父容器（适配移动端 Sheet 内部滚动）
-        let scrollParent: HTMLElement | null = el.parentElement;
-        while (scrollParent) {
-          const style = window.getComputedStyle(scrollParent);
-          if (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflow === 'auto' || style.overflow === 'scroll') {
-            scrollParent.scrollTo({ top: el.offsetTop - scrollParent.offsetTop - 80, behavior: 'smooth' });
-            break;
+        if (connectionSectionRef.current) {
+          const el = connectionSectionRef.current;
+          // 直接通过 #settings-main-content 查找滚动容器
+          const mainContent = document.getElementById('settings-main-content');
+          if (mainContent) {
+            const osViewport = mainContent.querySelector('.os-viewport') as HTMLElement | null;
+            const scrollContainer = osViewport || mainContent;
+            const elRect = el.getBoundingClientRect();
+            const containerRect = scrollContainer.getBoundingClientRect();
+            const currentScroll = scrollContainer.scrollTop;
+            const targetScroll = currentScroll + elRect.top - containerRect.top - 80;
+            scrollContainer.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
           }
-          scrollParent = scrollParent.parentElement;
         }
-        // 兜底：scrollIntoView
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        el.focus();
-        el.select();
-      }, 150);
+        if (nameInputRef.current) {
+          nameInputRef.current.focus();
+          nameInputRef.current.select();
+        }
+      }, 300);
       return () => clearTimeout(timer);
     }
   }, [isNewVendor, isEditingVendor]);
@@ -288,88 +292,84 @@ export const VendorDetailPanel: React.FC = () => {
       )}>
         {/* 卡片头部 */}
         <div className="p-3">
-          <div className="flex items-center gap-3">
-            <ProviderIcon modelId={api.model} size={20} showTooltip={false} />
-            <div className="flex-1 min-w-0 space-y-0.5">
+          {/* 第一行：图标 + 名称 + 开关 */}
+          <div className="flex items-center gap-2">
+            <ProviderIcon modelId={api.model} size={16} showTooltip={false} />
+            <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-foreground truncate">{profile.label || api.name}</span>
                 {!profile.enabled && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground whitespace-nowrap shrink-0">{t('settings:status.disabled')}</span>}
                 {isReadOnly && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary whitespace-nowrap shrink-0">{t('settings:api_config.badge_builtin_free')}</span>}
               </div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-mono text-xs text-muted-foreground truncate">{api.model}</span>
-                <ModelCapabilityIcons
-                  isMultimodal={profile.isMultimodal}
-                  isReasoning={profile.isReasoning}
-                  isEmbedding={profile.isEmbedding}
-                  isReranker={profile.isReranker}
-                  supportsTools={profile.supportsTools}
-                  size="xs"
-                />
-              </div>
             </div>
-
-            {/* 操作区域：次要操作 + 编辑 + 开关（开关在最右） */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              {/* 次要操作：hover 时显示 */}
-              <div className="flex items-center gap-0.5 opacity-0 group-hover/card:opacity-100 transition-opacity duration-150">
+            <Switch
+              checked={profile.enabled}
+              onCheckedChange={value => handleToggleModelProfile(profile, value)}
+              disabled={isReadOnly || vendorBusy}
+            />
+          </div>
+          {/* 第二行：模型ID + 能力图标 + 操作按钮 */}
+          <div className="flex items-center gap-1.5 mt-1.5 ml-[24px]">
+            <span className="font-mono text-xs text-muted-foreground truncate">{api.model}</span>
+            <ModelCapabilityIcons
+              isMultimodal={profile.isMultimodal}
+              isReasoning={profile.isReasoning}
+              isEmbedding={profile.isEmbedding}
+              isReranker={profile.isReranker}
+              supportsTools={profile.supportsTools}
+              size="xs"
+            />
+            <div className="flex-1" />
+            {/* 操作按钮 */}
+            <div className="flex items-center gap-0.5 shrink-0">
+              <NotionButton
+                size="sm"
+                variant="ghost"
+                iconOnly
+                className={cn("h-7 w-7", profile.isFavorite && "text-yellow-500")}
+                onClick={() => handleToggleFavorite(profile)}
+                disabled={vendorBusy}
+                title={t('settings:api_config.toggle_favorite')}
+              >
+                <Star className="h-3.5 w-3.5" weight={profile.isFavorite ? 'fill' : 'regular'} />
+              </NotionButton>
+              <NotionButton
+                size="sm"
+                variant="ghost"
+                iconOnly
+                className="h-7 w-7"
+                onClick={() => void testApiConnection(api)}
+                disabled={testingApi === api.id || vendorBusy}
+                title={t('settings:api_config.test_button')}
+              >
+                {testingApi === api.id ? <Spinner className="h-3.5 w-3.5 animate-spin" /> : <Pulse className="h-3.5 w-3.5" />}
+              </NotionButton>
+              {!isReadOnly ? (
                 <NotionButton
                   size="sm"
                   variant="ghost"
                   iconOnly
-                  className={cn(profile.isFavorite && "text-yellow-500 opacity-100")}
-                  onClick={() => handleToggleFavorite(profile)}
                   disabled={vendorBusy}
-                  title={t('settings:api_config.toggle_favorite')}
+                  title={t('common:actions.delete')}
+                  className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                  onClick={() => handleDeleteModelProfile(profile)}
                 >
-                  <Star className="h-3.5 w-3.5" weight={profile.isFavorite ? 'fill' : 'regular'} />
+                  <Trash className="h-3.5 w-3.5" />
                 </NotionButton>
-                <NotionButton
-                  size="sm"
-                  variant="ghost"
-                  iconOnly
-                  onClick={() => void testApiConnection(api)}
-                  disabled={testingApi === api.id || vendorBusy}
-                  title={t('settings:api_config.test_button')}
-                >
-                  {testingApi === api.id ? <Spinner className="h-3.5 w-3.5 animate-spin" /> : <Pulse className="h-3.5 w-3.5" />}
-                </NotionButton>
-
-                {/* 删除：触发全局确认对话框 */}
-                {!isReadOnly ? (
-                  <NotionButton
-                    size="sm"
-                    variant="ghost"
-                    iconOnly
-                    disabled={vendorBusy}
-                    title={t('common:actions.delete')}
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() => handleDeleteModelProfile(profile)}
-                  >
-                    <Trash className="h-3.5 w-3.5" />
-                  </NotionButton>
-                ) : (
-                  /* 占位：保持对齐 */
-                  <div className="h-7 w-7 shrink-0" />
-                )}
-              </div>
-              {/* 编辑按钮 */}
+              ) : (
+                <div className="h-7 w-7 shrink-0" />
+              )}
               <NotionButton
                 size="sm"
                 variant={isEditing ? "default" : "ghost"}
                 iconOnly
+                className="h-7 w-7"
                 onClick={handleEditClick}
                 disabled={vendorBusy}
                 title={t('common:actions.edit')}
               >
                 <PencilSimple className="h-3.5 w-3.5" />
               </NotionButton>
-              {/* 开关：最右 */}
-              <Switch
-                checked={profile.enabled}
-                onCheckedChange={value => handleToggleModelProfile(profile, value)}
-                disabled={isReadOnly || vendorBusy}
-              />
             </div>
           </div>
         </div>
@@ -430,7 +430,7 @@ export const VendorDetailPanel: React.FC = () => {
         {/* 连接配置区 — 可折叠 */}
         {isEditingVendor ? (
           /* 编辑模式：始终展开完整表单 */
-          <div className="flex flex-col gap-6 text-sm md:grid md:grid-cols-2">
+          <div ref={connectionSectionRef} className="flex flex-col gap-6 text-sm md:grid md:grid-cols-2">
             <div className="md:col-span-2 space-y-2">
               <Label className="text-xs font-medium text-muted-foreground">{t('settings:vendor_modal.name_label')}</Label>
               <Input ref={nameInputRef} value={vendorFormData.name || ''} onChange={e => setVendorFormData(prev => ({ ...prev, name: e.target.value }))} placeholder={t('settings:vendor_modal.name_placeholder')} />
@@ -449,6 +449,35 @@ export const VendorDetailPanel: React.FC = () => {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="md:col-span-2 space-y-2">
+              <Label className="text-xs font-medium text-muted-foreground">{t('settings:vendor_modal.protocol_label')}</Label>
+              {(() => {
+                const effectiveProviderType = vendorFormData.providerType || 'custom';
+                const protocolOptions = getAllowedApiProtocolsForProviderType(effectiveProviderType);
+                const currentProtocol = vendorFormData.apiProtocol || defaultApiProtocolForProvider(effectiveProviderType, { baseUrl: vendorFormData.baseUrl });
+                return (
+                  <Select
+                    value={currentProtocol}
+                    onValueChange={(val) => setVendorFormData(prev => ({
+                      ...prev,
+                      apiProtocol: val as VendorConfig['apiProtocol'],
+                      supportsOpenAIResponses: val === 'openai_responses',
+                    }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {protocolOptions.map(protocol => (
+                        <SelectItem key={protocol} value={protocol}>
+                          {t(`settings:vendor_modal.protocols.${protocol}`, { defaultValue: protocol })}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                );
+              })()}
             </div>
             <div className="md:col-span-2 space-y-2">
               <Label className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
@@ -621,6 +650,41 @@ export const VendorDetailPanel: React.FC = () => {
                         />
                       )}
                     </div>
+                  </div>
+
+                  {/* 请求格式 */}
+                  <div className="space-y-1.5">
+                    <div className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                      <span>{t('settings:vendor_panel.request_format', { defaultValue: '请求格式' })}</span>
+                    </div>
+                    {(() => {
+                      const effectiveProviderType = selectedVendor.providerType || 'custom';
+                      const protocolOptions = getAllowedApiProtocolsForProviderType(effectiveProviderType);
+                      const currentProtocol = selectedVendor.apiProtocol || defaultApiProtocolForProvider(effectiveProviderType, { baseUrl: selectedVendor.baseUrl });
+                      return (
+                        <Select
+                          value={currentProtocol}
+                          onValueChange={(val) => {
+                            handleSaveVendorApiProtocol(
+                              selectedVendor.id,
+                              val,
+                              val === 'openai_responses'
+                            );
+                          }}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {protocolOptions.map(protocol => (
+                              <SelectItem key={protocol} value={protocol}>
+                                {t(`settings:vendor_modal.protocols.${protocol}.label`, { defaultValue: protocol })}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      );
+                    })()}
                   </div>
 
                   {/* Notes */}

@@ -43,6 +43,7 @@ interface ApisTabProps {
   handleDeleteVendor: (vendor: VendorConfig) => void;
   handleSaveVendorBaseUrl: (vendorId: string, baseUrl: string) => void;
   handleToggleVendorNoApiKey: (vendorId: string, noApiKey: boolean) => void;
+  handleSaveVendorApiProtocol: (vendorId: string, apiProtocol: string, supportsOpenAIResponses: boolean) => void;
   handleSaveVendorApiKey: (vendorId: string, apiKey: string) => void;
   handleClearVendorApiKey: (vendorId: string) => void;
   handleOpenModelEditor: (vendor: VendorConfig, profile?: ModelProfile) => void;
@@ -98,6 +99,7 @@ export const ApisTab: React.FC<ApisTabProps> = (props) => {
     handleDeleteVendor: props.handleDeleteVendor,
     handleSaveVendorBaseUrl: props.handleSaveVendorBaseUrl,
     handleToggleVendorNoApiKey: props.handleToggleVendorNoApiKey,
+    handleSaveVendorApiProtocol: props.handleSaveVendorApiProtocol,
     handleSaveVendorApiKey: props.handleSaveVendorApiKey,
     handleClearVendorApiKey: props.handleClearVendorApiKey,
     handleOpenModelEditor: props.handleOpenModelEditor,

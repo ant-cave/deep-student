@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { VendorConfig, ModelProfile, ApiConfig, ModelAssignments } from '@/types';
+import { VendorConfig, ModelProfile, ApiConfig, ModelAssignments, type ApiProtocol } from '@/types';
 import { showGlobalNotification } from '@/components/UnifiedNotification';
 import { getErrorMessage } from '@/utils/errorUtils';
 import { debugLog } from '@/debug-panel/debugMasterSwitch';
@@ -450,6 +450,21 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       console.error('切换无需 API Key 模式失败:', errorMessage);
+      showGlobalNotification('error', t('settings:notifications.save_failed', { error: errorMessage }));
+    }
+  };
+
+  const handleSaveVendorApiProtocol = async (vendorId: string, apiProtocol: ApiProtocol, supportsOpenAIResponses: boolean) => {
+    try {
+      const vendor = vendors.find(v => v.id === vendorId);
+      if (!vendor) {
+        throw new Error(t('settings:mcp.vendor_not_found'));
+      }
+      const updated: VendorConfig = { ...vendor, apiProtocol, supportsOpenAIResponses };
+      await upsertVendor(updated);
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      console.error('保存请求格式失败:', errorMessage);
       showGlobalNotification('error', t('settings:notifications.save_failed', { error: errorMessage }));
     }
   };
@@ -1108,5 +1123,5 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
     return sensitivePatterns.some(pattern => key.includes(pattern));
   };
 
-  return { selectedVendorId, setSelectedVendorId, vendorModalOpen, setVendorModalOpen, editingVendor, setEditingVendor, isEditingVendor, isNewVendor, setIsNewVendor, vendorFormData, setVendorFormData, modelEditor, setModelEditor, inlineEditState, setInlineEditState, isAddingNewModel, setIsAddingNewModel, modelDeleteDialog, setModelDeleteDialog, vendorDeleteDialog, setVendorDeleteDialog, testingApi, vendorBusy, sortedVendors, selectedVendor, selectedVendorModels, profileCountByVendor, selectedVendorIsSiliconflow, testApiConnection, handleOpenVendorModal, handleAddNewVendor, handleStartEditVendor, handleCancelEditVendor, handleSaveEditVendor, handleSaveVendorModal, handleDeleteVendor, handleSaveVendorApiKey, handleSaveVendorBaseUrl, handleToggleVendorNoApiKey, handleReorderVendors, confirmDeleteVendor, handleOpenModelEditor, handleSaveModelProfile, handleSaveInlineEdit, handleAddModelInline, handleCloseModelEditor, handleSaveModelProfileAndClose, handleDeleteModelProfile, confirmDeleteModelProfile, handleToggleModelProfile, handleToggleFavorite, handleSiliconFlowConfig, handleAddVendorModels, getAllEnabledApis, getEmbeddingApis, getRerankerApis, getAsrApis, getImageGenerationApis, toUnifiedModelInfo, handleBatchCreateConfigs, handleApplyPreset, handleBatchConfigsCreated, handleClearVendorApiKey, triggerPostSaveAutoFlow, isSensitiveKey, maskApiKey, apiConfigsForApisTab };
+  return { selectedVendorId, setSelectedVendorId, vendorModalOpen, setVendorModalOpen, editingVendor, setEditingVendor, isEditingVendor, isNewVendor, setIsNewVendor, vendorFormData, setVendorFormData, modelEditor, setModelEditor, inlineEditState, setInlineEditState, isAddingNewModel, setIsAddingNewModel, modelDeleteDialog, setModelDeleteDialog, vendorDeleteDialog, setVendorDeleteDialog, testingApi, vendorBusy, sortedVendors, selectedVendor, selectedVendorModels, profileCountByVendor, selectedVendorIsSiliconflow, testApiConnection, handleOpenVendorModal, handleAddNewVendor, handleStartEditVendor, handleCancelEditVendor, handleSaveEditVendor, handleSaveVendorModal, handleDeleteVendor, handleSaveVendorApiKey, handleSaveVendorBaseUrl, handleToggleVendorNoApiKey, handleSaveVendorApiProtocol, handleReorderVendors, confirmDeleteVendor, handleOpenModelEditor, handleSaveModelProfile, handleSaveInlineEdit, handleAddModelInline, handleCloseModelEditor, handleSaveModelProfileAndClose, handleDeleteModelProfile, confirmDeleteModelProfile, handleToggleModelProfile, handleToggleFavorite, handleSiliconFlowConfig, handleAddVendorModels, getAllEnabledApis, getEmbeddingApis, getRerankerApis, getAsrApis, getImageGenerationApis, toUnifiedModelInfo, handleBatchCreateConfigs, handleApplyPreset, handleBatchConfigsCreated, handleClearVendorApiKey, triggerPostSaveAutoFlow, isSensitiveKey, maskApiKey, apiConfigsForApisTab };
 }

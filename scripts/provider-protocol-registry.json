@@ -152,7 +152,9 @@
       "provider_type": "custom",
       "allowed_protocols": [
         "openai_chat_completions",
-        "openai_responses"
+        "openai_responses",
+        "google_generate_content",
+        "anthropic_messages"
       ],
       "default_protocol": "openai_chat_completions",
       "official": false,
