@@ -71,6 +71,40 @@ const SaveIndicator: React.FC<{ status: SaveStatus }> = ({ status }) => {
 
 const normalizeBaseUrl = (url: string) => url.trim().replace(/\/+$/, '');
 
+/**
+ * rAF 缓动模拟平滑滚动。
+ * 解决 OverlayScrollbars 不响应原生 scrollTo({behavior:'smooth'}) 的问题。
+ * 返回 cancel 函数以便组件卸载/依赖变更时取消动画。
+ */
+const smoothScrollTo = (
+  el: HTMLElement,
+  target: number,
+  duration = 350,
+): (() => void) => {
+  const start = el.scrollTop;
+  const distance = target - start;
+  const startTime = performance.now();
+  let rafId = 0;
+  let cancelled = false;
+  const tick = (now: number) => {
+    if (cancelled) return;
+    const t = Math.min(1, (now - startTime) / duration);
+    // ease-out cubic
+    const eased = 1 - Math.pow(1 - t, 3);
+    el.scrollTop = start + distance * eased;
+    if (t < 1) {
+      rafId = requestAnimationFrame(tick);
+    } else {
+      el.scrollTop = target;
+    }
+  };
+  rafId = requestAnimationFrame(tick);
+  return () => {
+    cancelled = true;
+    if (rafId) cancelAnimationFrame(rafId);
+  };
+};
+
 type TranslateFn = (key: string, options?: { defaultValue?: string }) => string;
 
 const getProviderDisplayName = (providerType?: string | null, t?: TranslateFn) => {
@@ -165,27 +199,32 @@ export const VendorDetailPanel: React.FC = () => {
 
   // 新建供应商时，滚动到连接配置区并聚焦名称输入框
   useEffect(() => {
-    console.log('[VendorDetailPanel] useEffect 触发', { isNewVendor, isEditingVendor });
     if (isNewVendor && isEditingVendor) {
+      let cancelScroll: (() => void) | null = null;
       const timer = setTimeout(() => {
         if (connectionSectionRef.current) {
           const el = connectionSectionRef.current;
-          // 直接通过 #settings-main-content 查找滚动容器
+          // 查找真正的滚动容器：OS viewport > iOS native > #settings-main-content
           const mainContent = document.getElementById('settings-main-content');
-          if (mainContent) {
-            const osViewport = mainContent.querySelector('.os-viewport') as HTMLElement | null;
-            const scrollContainer = osViewport || mainContent;
+          const scrollContainer = (mainContent?.querySelector(
+            '[data-overlayscrollbars-viewport]',
+          ) as HTMLElement | null)
+            || (mainContent?.querySelector('.scroll-area--native') as HTMLElement | null)
+            || mainContent;
+          if (scrollContainer) {
             const elRect = el.getBoundingClientRect();
             const containerRect = scrollContainer.getBoundingClientRect();
             const currentScroll = scrollContainer.scrollTop;
-            const targetScroll = currentScroll + elRect.top - containerRect.top - 80;
+            // offset: 让 供应商名称 标签与滚动容器顶部之间留出 16px 呼吸距离
+            const targetScroll = Math.max(0, currentScroll + elRect.top - containerRect.top - 16);
             console.log('滚动！！！', {
               currentScroll,
               elRectTop: elRect.top,
               containerRectTop: containerRect.top,
               targetScroll,
             });
-            scrollContainer.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
+            // 使用 rAF 缓动模拟平滑滚动（OverlayScrollbars 不响应原生 smooth scrollTo）
+            cancelScroll = smoothScrollTo(scrollContainer, targetScroll, 350);
           }
         }
         if (nameInputRef.current) {
@@ -193,7 +232,10 @@ export const VendorDetailPanel: React.FC = () => {
           nameInputRef.current.select();
         }
       }, 300);
-      return () => clearTimeout(timer);
+      return () => {
+        clearTimeout(timer);
+        cancelScroll?.();
+      };
     }
   }, [isNewVendor, isEditingVendor]);
 
