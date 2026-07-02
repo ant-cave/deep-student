@@ -165,6 +165,7 @@ export const VendorDetailPanel: React.FC = () => {
 
   // 新建供应商时，滚动到连接配置区并聚焦名称输入框
   useEffect(() => {
+    console.log('[VendorDetailPanel] useEffect 触发', { isNewVendor, isEditingVendor });
     if (isNewVendor && isEditingVendor) {
       const timer = setTimeout(() => {
         if (connectionSectionRef.current) {
@@ -178,6 +179,12 @@ export const VendorDetailPanel: React.FC = () => {
             const containerRect = scrollContainer.getBoundingClientRect();
             const currentScroll = scrollContainer.scrollTop;
             const targetScroll = currentScroll + elRect.top - containerRect.top - 80;
+            console.log('滚动！！！', {
+              currentScroll,
+              elRectTop: elRect.top,
+              containerRectTop: containerRect.top,
+              targetScroll,
+            });
             scrollContainer.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
           }
         }
@@ -326,7 +333,7 @@ export const VendorDetailPanel: React.FC = () => {
                 size="sm"
                 variant="ghost"
                 iconOnly
-                className={cn("h-7 w-7", profile.isFavorite && "text-yellow-500")}
+                className={cn("!h-7 !w-7", profile.isFavorite && "text-yellow-500")}
                 onClick={() => handleToggleFavorite(profile)}
                 disabled={vendorBusy}
                 title={t('settings:api_config.toggle_favorite')}
@@ -337,7 +344,7 @@ export const VendorDetailPanel: React.FC = () => {
                 size="sm"
                 variant="ghost"
                 iconOnly
-                className="h-7 w-7"
+                className="!h-7 !w-7"
                 onClick={() => void testApiConnection(api)}
                 disabled={testingApi === api.id || vendorBusy}
                 title={t('settings:api_config.test_button')}
@@ -351,7 +358,7 @@ export const VendorDetailPanel: React.FC = () => {
                   iconOnly
                   disabled={vendorBusy}
                   title={t('common:actions.delete')}
-                  className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                  className="!h-7 !w-7 text-muted-foreground hover:text-destructive"
                   onClick={() => handleDeleteModelProfile(profile)}
                 >
                   <Trash className="h-3.5 w-3.5" />
@@ -363,7 +370,7 @@ export const VendorDetailPanel: React.FC = () => {
                 size="sm"
                 variant={isEditing ? "default" : "ghost"}
                 iconOnly
-                className="h-7 w-7"
+                className="!h-7 !w-7"
                 onClick={handleEditClick}
                 disabled={vendorBusy}
                 title={t('common:actions.edit')}

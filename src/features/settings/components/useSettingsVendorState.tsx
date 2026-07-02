@@ -102,11 +102,16 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
     }
   }, [sortedVendors, selectedVendorId]);
 
-  // 切换供应商时退出编辑模式
+  // 切换供应商时退出编辑模式（新建供应商场景除外）
   useEffect(() => {
-    setIsEditingVendor(false);
+    // 新建供应商场景下 handleAddNewVendor 会显式设置 isEditingVendor=true，
+    // 此处不应覆盖（通过 setIsNewVendor 标记的"新建"流程）
+    if (!isNewVendor) {
+      setIsEditingVendor(false);
+    }
     setVendorFormData({});
-  }, [selectedVendorId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVendorId, isNewVendor]);
 
   const testApiConnection = async (api: ApiConfig) => {
     if (api.isBuiltin) {
