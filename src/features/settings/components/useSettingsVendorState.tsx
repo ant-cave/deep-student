@@ -346,10 +346,8 @@ export function useSettingsVendorState(deps: UseSettingsVendorStateDeps) {
         closeRightPanel();
       }
       showGlobalNotification('success', t('common:config_saved'));
-      // noApiKey 供应商：创建后自动获取模型列表
-      if (saved.noApiKey) {
-        triggerPostSaveAutoFlow(saved);
-      }
+      // 保存后自动获取模型列表（不管有没有 API Key，autoPostSaveFlow 内部会处理 key 为空的情况）
+      triggerPostSaveAutoFlow(saved);
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       showGlobalNotification('error', t('settings:notifications.vendor_save_failed', { error: errorMessage }));

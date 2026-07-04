@@ -104,6 +104,11 @@ interface DialogContentProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 
    * 颜色随主题切换，符合项目设计语义。
    */
   overlayClassName?: string;
+  /**
+   * 自定义 z-index 层级。默认使用 Z_INDEX.modal（3000），
+   * 当 Dialog 需要覆盖在 Sheet（4000）等高层级组件上时可传更高值。
+   */
+  zIndex?: number;
 }
 
 // Internal portal component to handle animations
@@ -146,6 +151,7 @@ export function DialogContent({
   closeOnOverlayClick = true,
   containerSelector,
   overlayClassName,
+  zIndex,
   onClick,
   ...rest
 }: DialogContentProps) {
@@ -160,6 +166,8 @@ export function DialogContent({
   // 如果指定了容器，使用 absolute 定位；否则使用 fixed 定位
   const positionClass = containerSelector ? 'absolute' : 'fixed';
 
+  const effectiveZ = zIndex ?? Z_INDEX.modal;
+
   return (
     <DialogPortal open={ctx.open} containerSelector={containerSelector}>
       {/* Overlay - 实色遮罩，无高斯模糊。颜色随主题切换。 */}
@@ -169,7 +177,7 @@ export function DialogContent({
           positionClass,
           overlayClassName
         )}
-        style={{ zIndex: Z_INDEX.modal }}
+        style={{ zIndex: effectiveZ }}
         variants={overlayVariants}
         initial="hidden"
         animate="visible"
@@ -185,7 +193,7 @@ export function DialogContent({
           positionClass
         )}
         style={{
-          zIndex: Z_INDEX.modal + 1,
+          zIndex: effectiveZ + 1,
           ...(keyboardAvoid
             ? {
                 alignItems: 'flex-start',

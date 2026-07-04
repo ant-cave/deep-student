@@ -13,6 +13,7 @@
  *   drawer (2500)          → 侧边栏/抽屉内容
  *   modal (3000)           → 模态对话框
  *   sheet (4000)           → 底部 Sheet
+ *   sheetModal (4500)      → 覆盖在 Sheet 上的 Dialog
  *   toast (5000)           → 通知 Toast
  *   imageViewer (6000)     → 全屏图片查看器
  *   contextMenu (9000-9050)→ Portal 右键菜单
@@ -57,6 +58,9 @@ export const Z_INDEX = {
 
   /** 底部 Sheet（Radix Sheet / 移动端设置抽屉等） */
   sheet: 4000,
+
+  /** 覆盖在 Sheet 上的 Dialog（如设置页内获取模型列表弹窗） */
+  sheetModal: 4500,
 
   /** 通知 Toast */
   toast: 5000,

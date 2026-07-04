@@ -99,6 +99,8 @@ export interface NotionDialogProps {
   /** 内容区最大宽度 class，默认 max-w-lg */
   maxWidth?: string;
   className?: string;
+  /** 内联渲染，不走 portal（用于被 Sheet 等高层级容器包裹时避免 z-index 冲突） */
+  inline?: boolean;
 }
 
 export function NotionDialog({
@@ -109,6 +111,7 @@ export function NotionDialog({
   showClose = true,
   maxWidth = 'max-w-lg',
   className,
+  inline = false,
 }: NotionDialogProps) {
   // ESC 关闭
   React.useEffect(() => {
@@ -133,82 +136,100 @@ export function NotionDialog({
   const keyboardHeight = useKeyboardHeight();
   const keyboardAvoid = keyboardHeight > 0;
 
-  return (
-    <ModalPortal open={open}>
+  const dialogContent = (
+    <motion.div
+      data-overlay-container="true"
+      className={cn(
+        'pointer-events-auto fixed inset-0 flex',
+        isMobileSheet ? 'items-end justify-center p-0' : 'items-center justify-center p-4 sm:p-6',
+      )}
+      style={{
+        zIndex: inline ? Z_INDEX.sheet + 1 : Z_INDEX.modal,
+        ...(keyboardAvoid
+          ? {
+              ...(isMobileSheet ? {} : { alignItems: 'flex-start', paddingTop: '12px' }),
+              paddingBottom: `${getLayoutViewportObscuredHeight()}px`,
+            }
+          : {}),
+      }}
+      initial="hidden"
+      animate="visible"
+      exit="exit"
+    >
+      {/* 遮罩 */}
       <motion.div
-        data-overlay-container="true"
+        className="fixed inset-0 bg-black/30 backdrop-blur-[2px]"
+        variants={overlayVariants}
+        onClick={(e) => {
+          e.stopPropagation();
+          closeOnOverlay && onOpenChange(false);
+        }}
+      />
+      {/* 内容 */}
+      <motion.div
+        role="dialog"
+        aria-modal="true"
+        variants={isMobileSheet ? sheetContentVariants : contentVariants}
         className={cn(
-          'pointer-events-auto fixed inset-0 flex',
-          isMobileSheet ? 'items-end justify-center p-0' : 'items-center justify-center p-4 sm:p-6',
+          'relative border bg-background text-foreground',
+          'flex flex-col overflow-hidden',
+          isMobileSheet
+            ? 'w-full max-w-none rounded-b-none rounded-t-[24px] border-x-0 border-b-0'
+            : cn('w-[92vw] rounded-[var(--radius-shell-dialog)]', maxWidth),
+          className,
         )}
         style={{
-          zIndex: Z_INDEX.modal,
-          ...(keyboardAvoid
-            ? {
-                ...(isMobileSheet ? {} : { alignItems: 'flex-start', paddingTop: '12px' }),
-                // adjustResize 下为 0；非 resize 模式下补偿键盘遮挡区域
-                paddingBottom: `${getLayoutViewportObscuredHeight()}px`,
-              }
-            : {}),
+          zIndex: Z_INDEX.modal + 1,
+          maxHeight: inline
+            ? 'min(85vh, 720px)'
+            : isMobileSheet
+              ? 'min(86dvh, calc(100dvh - 0.5rem))'
+              : 'min(85vh, 720px)',
+          paddingBottom: isMobileSheet
+            ? 'var(--android-safe-area-bottom, env(safe-area-inset-bottom, 0px))'
+            : undefined,
+          background: 'var(--dialog-shell-surface)',
+          borderColor: 'var(--dialog-shell-border)',
+          boxShadow: 'var(--shadow-shell-floating)',
         }}
-        initial="hidden"
-        animate="visible"
-        exit="exit"
+        onClick={(e) => e.stopPropagation()}
       >
-        {/* 遮罩 */}
-        <motion.div
-          className="fixed inset-0 bg-black/30 backdrop-blur-[2px]"
-          variants={overlayVariants}
-          onClick={() => closeOnOverlay && onOpenChange(false)}
-/>
-        {/* 内容 */}
-        <motion.div
-          role="dialog"
-          aria-modal="true"
-          variants={isMobileSheet ? sheetContentVariants : contentVariants}
-          className={cn(
-            'relative border bg-background text-foreground',
-            'flex flex-col overflow-hidden',
-            isMobileSheet
-              ? 'w-full max-w-none rounded-b-none rounded-t-[24px] border-x-0 border-b-0'
-              : cn('w-[92vw] rounded-[var(--radius-shell-dialog)]', maxWidth),
-            className,
-          )}
-          style={{
-            zIndex: Z_INDEX.modal + 1,
-            maxHeight: isMobileSheet ? 'min(86dvh, calc(100dvh - 0.5rem))' : 'min(85vh, 720px)',
-            paddingBottom: isMobileSheet
-              ? 'var(--android-safe-area-bottom, env(safe-area-inset-bottom, 0px))'
-              : undefined,
-            background: 'var(--dialog-shell-surface)',
-            borderColor: 'var(--dialog-shell-border)',
-            boxShadow: 'var(--shadow-shell-floating)',
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {isMobileSheet && (
-            <div aria-hidden className="flex h-6 shrink-0 items-center justify-center">
-              <div className="h-1 w-12 rounded-full bg-[color:var(--mobile-sheet-handle,var(--border))]" />
-            </div>
-          )}
-          {showClose && (
-            <NotionButton
-              variant="ghost"
-              size="sm"
-              iconOnly
-              aria-label="Close"
-              className={cn(
-                'absolute z-10 text-muted-foreground/50 hover:text-foreground',
-                isMobileSheet ? 'right-3 top-3 h-8 w-8' : 'w-6 h-6 top-2.5 right-2.5',
-              )}
-              onClick={() => onOpenChange(false)}
-            >
-              <X size={16} />
-            </NotionButton>
-          )}
-          {children}
-        </motion.div>
+        {isMobileSheet && (
+          <div aria-hidden className="flex h-6 shrink-0 items-center justify-center">
+            <div className="h-1 w-12 rounded-full bg-[color:var(--mobile-sheet-handle,var(--border))]" />
+          </div>
+        )}
+        {showClose && (
+          <NotionButton
+            variant="ghost"
+            size="sm"
+            iconOnly
+            aria-label="Close"
+            className={cn(
+              'absolute z-10 text-muted-foreground hover:text-foreground',
+              isMobileSheet ? 'right-3 top-3 h-8 w-8' : 'w-6 h-6 top-2.5 right-2.5',
+            )}
+            onClick={() => onOpenChange(false)}
+          >
+            <X size={16} />
+          </NotionButton>
+        )}
+        {children}
       </motion.div>
+    </motion.div>
+  );
+
+  if (inline) {
+    return (
+      <AnimatePresence mode="wait">
+        {open && dialogContent}
+      </AnimatePresence>
+    );
+  }
+
+  return (
+    <ModalPortal open={open}>
+      {dialogContent}
     </ModalPortal>
   );
 }

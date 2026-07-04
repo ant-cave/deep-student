@@ -9,7 +9,6 @@ import { NotionButton } from '@/components/ui/NotionButton';
 import { Label } from '@/components/ui/shad/Label';
 import { Switch } from '@/components/ui/shad/Switch';
 import { SecurePasswordInput } from '@/components/SecurePasswordInput';
-import { CustomScrollArea } from '@/components/custom-scroll-area';
 import type { ApiProtocol, VendorConfig } from '@/types';
 import {
   defaultApiProtocolForProvider,
@@ -308,91 +307,76 @@ export const VendorConfigModal = forwardRef<VendorConfigModalRef, VendorConfigMo
           />
         </div>
       )}
-      {isEditing && (
-        <>
-          {!formData.noApiKey && (
-          <div>
-            <Label className="inline-flex items-center gap-1.5">
-              <Key className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>{t('settings:vendor_modal.api_key_label')}</span>
-            </Label>
-            <SecurePasswordInput
-              value={formData.apiKey}
-              placeholder={vendor && !formData.apiKey ? t('settings:vendor_modal.api_key_placeholder_keep_or_update') : "sk-..."}
-              onChange={value => {
-                setFormData(prev => ({ ...prev, apiKey: value }));
-                if (forceClearApiKey) {
-                  setForceClearApiKey(false);
-                }
+      {!formData.noApiKey && (
+      <div>
+        <Label className="inline-flex items-center gap-1.5">
+          <Key className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>{t('settings:vendor_modal.api_key_label')}</span>
+        </Label>
+        <SecurePasswordInput
+          value={formData.apiKey}
+          placeholder={vendor && !formData.apiKey ? t('settings:vendor_modal.api_key_placeholder_keep_or_update') : "sk-..."}
+          onChange={value => {
+            setFormData(prev => ({ ...prev, apiKey: value }));
+            if (forceClearApiKey) {
+              setForceClearApiKey(false);
+            }
+          }}
+          className="mt-2"
+        />
+        {vendor && vendor.id && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <NotionButton
+              type="button"
+              size="sm"
+              variant="danger"
+              onClick={() => {
+                setForceClearApiKey(true);
+                setFormData(prev => ({ ...prev, apiKey: '' }));
               }}
-              className="mt-2"
-            />
-            {vendor && vendor.id && (
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <NotionButton
-                  type="button"
-                  size="sm"
-                  variant="danger"
-                  onClick={() => {
-                    setForceClearApiKey(true);
-                    setFormData(prev => ({ ...prev, apiKey: '' }));
-                  }}
-                  title={t('settings:vendor_modal.clear_api_key_title')}
-                >
-                  <Trash className="h-3.5 w-3.5" />
-                  {t('settings:vendor_modal.clear_api_key')}
-                </NotionButton>
-                {forceClearApiKey && (
-                  <div className="text-xs text-destructive">
-                    {t('settings:vendor_modal.clear_api_key_warning')}
-                  </div>
-                )}
+              title={t('settings:vendor_modal.clear_api_key_title')}
+            >
+              <Trash className="h-3.5 w-3.5" />
+              {t('settings:vendor_modal.clear_api_key')}
+            </NotionButton>
+            {forceClearApiKey && (
+              <div className="text-xs text-destructive">
+                {t('settings:vendor_modal.clear_api_key_warning')}
               </div>
             )}
           </div>
-          )}
-          <div>
-            <Label className="inline-flex items-center gap-1.5">
-              <NotePencil className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>{t('settings:vendor_modal.notes_label')}</span>
-            </Label>
-            <Textarea
-              value={formData.notes ?? ''}
-              onChange={e => setFormData(prev => ({ ...prev, notes: e.target.value }))}
-              placeholder={t('settings:vendor_modal.notes_placeholder')}
-              className="mt-2"
-              rows={3}
-            />
-          </div>
-          <div>
-            <Label>{t('settings:vendor_modal.headers_label')}</Label>
-            <Textarea
-              value={headersInput}
-              onChange={e => setHeadersInput(e.target.value)}
-              placeholder={t('settings:vendor_modal.headers_placeholder')}
-              className="mt-2 font-mono"
-              rows={3}
-            />
-          </div>
-        </>
+        )}
+      </div>
       )}
+      <div>
+        <Label className="inline-flex items-center gap-1.5">
+          <NotePencil className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>{t('settings:vendor_modal.notes_label')}</span>
+        </Label>
+        <Textarea
+          value={formData.notes ?? ''}
+          onChange={e => setFormData(prev => ({ ...prev, notes: e.target.value }))}
+          placeholder={t('settings:vendor_modal.notes_placeholder')}
+          className="mt-2 resize-none"
+          rows={3}
+        />
+      </div>
+      <div>
+        <Label>{t('settings:vendor_modal.headers_label')}</Label>
+        <Textarea
+          value={headersInput}
+          onChange={e => setHeadersInput(e.target.value)}
+          placeholder={t('settings:vendor_modal.headers_placeholder')}
+          className="mt-2 font-mono resize-none"
+          rows={3}
+        />
+      </div>
     </div>
   );
 
-  // 嵌入模式：直接返回内容，不使用 Dialog 包裹（标题和保存按钮由全局移动端顶栏提供）
-  if (embeddedMode) {
-    return (
-      <div className="h-full flex flex-col bg-background">
-        <CustomScrollArea className="flex-1 min-h-0" viewportClassName="px-4 py-4 pb-safe">
-          {formContent}
-        </CustomScrollArea>
-      </div>
-    );
-  }
-
   // 模态框模式
   return (
-    <NotionDialog open={open} onOpenChange={onClose} maxWidth="max-w-lg">
+    <NotionDialog open={open} onOpenChange={onClose} maxWidth="max-w-lg" inline={embeddedMode}>
         <NotionDialogHeader>
           <NotionDialogTitle>
             {vendor ? t('settings:vendor_modal.title_edit') : t('settings:vendor_modal.title_new')}

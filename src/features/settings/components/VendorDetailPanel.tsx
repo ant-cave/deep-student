@@ -3,18 +3,16 @@
  * 从 ApisTab 拆分，负责渲染选中供应商的配置和模型列表
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowSquareOut, CaretDown, CaretUp, Check, DotsThree, DownloadSimple, Key, LinkSimple, NotePencil, PencilSimple, Plus, Prohibit, Pulse, Spinner, Star, Trash } from '@phosphor-icons/react';
+import { ArrowSquareOut, CaretDown, CaretUp, Check, DownloadSimple, LinkSimple, PencilSimple, Plus, Pulse, Spinner, Star, Trash, X } from '@phosphor-icons/react';
 import { NotionButton } from '@/components/ui/NotionButton';
-import { Input } from '@/components/ui/shad/Input';
-import { Textarea } from '@/components/ui/shad/Textarea';
-import { Label } from '@/components/ui/shad/Label';
 import { Badge } from '@/components/ui/shad/Badge';
 import { Switch } from '@/components/ui/shad/Switch';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/shad/Sheet';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/shad/Dialog';
 import { CustomScrollArea } from '@/components/custom-scroll-area';
+import { Z_INDEX } from '@/config/zIndex';
 import { cn } from '@/lib/utils';
 import { showGlobalNotification } from '@/components/UnifiedNotification';
 import { ProviderIcon } from '@/components/ui/ProviderIcon';
@@ -27,7 +25,6 @@ import {
   settingsQuietRowBaseClassName,
 } from './SettingsCommon';
 import { SiliconFlowSection } from './SiliconFlowSection';
-import { VendorApiKeySection } from './VendorApiKeySection';
 import { VendorModelFetcher, supportsModelFetching } from './VendorModelFetcher';
 import { ShadApiEditModal } from './ShadApiEditModal';
 import { useVendorSettings } from './VendorSettingsContext';
@@ -35,22 +32,7 @@ import { convertProfileToApiConfig } from './modelConverters';
 import { groupByModelFamily } from './modelFamily';
 import type { VendorConfig } from '@/types';
 
-// --- Save Status Indicator ---
-type SaveStatus = 'idle' | 'saving' | 'saved';
-
-const SaveIndicator: React.FC<{ status: SaveStatus }> = ({ status }) => {
-  if (status === 'idle') return null;
-  return (
-    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground animate-in fade-in duration-200">
-      {status === 'saving' && <Spinner className="h-3 w-3 animate-spin" />}
-      {status === 'saved' && <Check className="h-3 w-3 text-green-500" />}
-    </span>
-  );
-};
-
 // --- Helpers ---
-
-const normalizeBaseUrl = (url: string) => url.trim().replace(/\/+$/, '');
 
 type TranslateFn = (key: string, options?: { defaultValue?: string }) => string;
 
@@ -107,18 +89,9 @@ export const VendorDetailPanel: React.FC = () => {
     selectedVendorModels,
     selectedVendorIsSiliconflow,
     vendorBusy,
-    vendorSaving,
-    isEditingVendor,
-    vendorFormData,
-    setVendorFormData,
     testingApi,
-    handleStartEditVendor,
-    handleCancelEditVendor,
-    handleSaveEditVendor,
+    handleOpenVendorModal,
     handleDeleteVendor,
-    handleSaveVendorBaseUrl,
-    handleSaveVendorApiKey,
-    handleClearVendorApiKey,
     handleOpenModelEditor,
     inlineEditState,
     setInlineEditState,
@@ -134,25 +107,10 @@ export const VendorDetailPanel: React.FC = () => {
     handleBatchCreateConfigs,
     handleBatchConfigsCreated,
     onAddVendorModels,
-    triggerPostSaveAutoFlow,
-    isSmallScreen,
   } = useVendorSettings();
 
-  const [baseUrlDraft, setBaseUrlDraft] = useState('');
-  const [baseUrlSaveStatus, setBaseUrlSaveStatus] = useState<SaveStatus>('idle');
-  const [connectionExpanded, setConnectionExpanded] = useState(false);
   const [collapsedFamilies, setCollapsedFamilies] = useState<Set<string>>(new Set());
   const [isModelFetcherDialogOpen, setIsModelFetcherDialogOpen] = useState(false);
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // 判断连接是否已配置（有 baseUrl 且有 apiKey，或 noApiKey 模式）
-  const isConnectionConfigured = useMemo(() => {
-    if (!selectedVendor) return false;
-    const hasUrl = !!(selectedVendor.baseUrl?.trim());
-    if (selectedVendor.noApiKey) return hasUrl;
-    const hasKey = !!(selectedVendor.apiKey?.trim());
-    return hasUrl && hasKey;
-  }, [selectedVendor?.baseUrl, selectedVendor?.apiKey, selectedVendor?.noApiKey]);
 
   // 模型按家族分组（GPT-4 / Claude Opus / Gemini 2.5 …）
   const familyGroups = useMemo(
@@ -162,48 +120,10 @@ export const VendorDetailPanel: React.FC = () => {
   // 仅当存在 2 个及以上家族时才分组渲染；否则维持扁平避免噪声
   const shouldGroupByFamily = familyGroups.length >= 2;
 
-  // 切换供应商时重置状态
+  // 切换供应商时折叠状态归零（默认全展开）
   useEffect(() => {
-    setBaseUrlDraft(selectedVendor?.baseUrl || '');
-    setBaseUrlSaveStatus('idle');
-    // 已配置的供应商默认收起连接区，未配置的默认展开
-    setConnectionExpanded(!isConnectionConfigured);
-    // 切换供应商时折叠状态归零（默认全展开）
     setCollapsedFamilies(new Set());
-  }, [selectedVendor?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // baseUrl 变化时同步 draft（外部更新）
-  useEffect(() => {
-    setBaseUrlDraft(selectedVendor?.baseUrl || '');
-  }, [selectedVendor?.baseUrl]);
-
-  // 清理 timer
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    };
-  }, []);
-
-  const handleBaseUrlSave = useCallback(() => {
-    if (!selectedVendor) return;
-    const normalized = normalizeBaseUrl(baseUrlDraft);
-    if (!normalized) {
-      showGlobalNotification('error', t('settings:vendor_modal.validation_base_url'));
-      setBaseUrlDraft(selectedVendor.baseUrl || '');
-      return;
-    }
-    if (normalizeBaseUrl(selectedVendor.baseUrl || '') === normalized) {
-      return;
-    }
-    setBaseUrlSaveStatus('saving');
-    handleSaveVendorBaseUrl(selectedVendor.id, normalized);
-    // 模拟保存完成（实际保存是同步的 state update）
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      setBaseUrlSaveStatus('saved');
-      saveTimerRef.current = setTimeout(() => setBaseUrlSaveStatus('idle'), 2000);
-    }, 300);
-  }, [selectedVendor, baseUrlDraft, handleSaveVendorBaseUrl, t]);
+  }, [selectedVendor?.id]);
 
   if (!selectedVendor) {
     return (
@@ -362,173 +282,53 @@ export const VendorDetailPanel: React.FC = () => {
               })()}
             </div>
             <div className="flex flex-wrap gap-2">
-              {isEditingVendor ? (
-                <>
-                  <NotionButton size="sm" variant="ghost" onClick={handleCancelEditVendor}>{t('common:actions.cancel')}</NotionButton>
-                  <NotionButton size="sm" variant="primary" onClick={handleSaveEditVendor} disabled={vendorSaving}>{t('common:actions.save')}</NotionButton>
-                </>
-              ) : (
-                <>
-                  <NotionButton size="sm" variant="ghost" onClick={() => handleStartEditVendor(selectedVendor)}>{t('common:actions.edit')}</NotionButton>
-                  {!selectedVendorIsSiliconflow && !selectedVendor.isBuiltin && !selectedVendor.isReadOnly && (
-                    <NotionButton size="sm" variant="danger" onClick={() => handleDeleteVendor(selectedVendor)}>{t('common:actions.delete')}</NotionButton>
-                  )}
-                </>
+              <NotionButton size="sm" variant="ghost" onClick={() => handleOpenVendorModal(selectedVendor)}>{t('common:actions.edit')}</NotionButton>
+              {!selectedVendorIsSiliconflow && !selectedVendor.isBuiltin && !selectedVendor.isReadOnly && (
+                <NotionButton size="sm" variant="danger" onClick={() => handleDeleteVendor(selectedVendor)}>{t('common:actions.delete')}</NotionButton>
               )}
             </div>
           </div>
         </div>
 
-        {/* 连接配置区 — 可折叠 */}
-        {isEditingVendor ? (
-          /* 编辑模式：始终展开完整表单 */
-          <div className="flex flex-col gap-6 text-sm md:grid md:grid-cols-2">
-            <div className="md:col-span-2 space-y-2">
-              <Label className="text-xs font-medium text-muted-foreground">{t('settings:vendor_modal.name_label')}</Label>
-              <Input value={vendorFormData.name || ''} onChange={e => setVendorFormData(prev => ({ ...prev, name: e.target.value }))} placeholder={t('settings:vendor_modal.name_placeholder')} />
-            </div>
-            <div className="md:col-span-2 space-y-2">
-              <Label className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                <LinkSimple className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>{t('settings:vendor_modal.base_url_label')}</span>
-              </Label>
-              <Input value={vendorFormData.baseUrl || ''} onChange={e => setVendorFormData(prev => ({ ...prev, baseUrl: e.target.value }))} placeholder="https://api.openai.com/v1" className="font-mono" />
-            </div>
-            <div className="md:col-span-2 space-y-2">
-              <Label className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                <NotePencil className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>{t('settings:vendor_modal.notes_label')}</span>
-              </Label>
-              <Textarea value={vendorFormData.notes || ''} onChange={e => setVendorFormData(prev => ({ ...prev, notes: e.target.value }))} placeholder={t('settings:vendor_modal.notes_placeholder')} rows={3} />
-            </div>
-          </div>
-        ) : (
-          /* 查看模式：可折叠连接配置 */
-          <div className="rounded-lg border border-border/40 overflow-hidden">
-            {/* 折叠头部 / 摘要行 */}
-            <button
-              type="button"
-              onClick={() => setConnectionExpanded(v => !v)}
-              className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-muted/30 transition-colors"
-            >
-              <div className="flex items-center gap-2 min-w-0 text-sm">
-                <LinkSimple className="h-4 w-4 text-muted-foreground shrink-0" aria-hidden="true" />
-                {isConnectionConfigured ? (
-                  <span className="flex items-center gap-2 min-w-0 text-muted-foreground">
-                    <Check className="h-3.5 w-3.5 text-green-500 shrink-0" />
-                    <span className="truncate font-mono text-xs">{selectedVendor.baseUrl}</span>
-                    <span className="text-muted-foreground/60 shrink-0">·</span>
-                    {selectedVendor.noApiKey ? (
-                      <span className="text-xs shrink-0 text-muted-foreground">
-                        {t('settings:vendor_panel.no_api_key_short', { defaultValue: '无 Key' })}
-                      </span>
-                    ) : (
-                      <span className="text-xs shrink-0">{t('settings:vendor_panel.api_key_configured_short', { defaultValue: 'Key ✓' })}</span>
-                    )}
-                  </span>
-                ) : (
-                  <span className="text-muted-foreground text-xs">
-                    {t('settings:vendor_panel.connection_not_configured', { defaultValue: '\u8fde\u63a5\u672a\u914d\u7f6e' })}
-                  </span>
-                )}
-              </div>
-              <span className="text-muted-foreground shrink-0">
-                {connectionExpanded ? <CaretUp className="h-4 w-4" /> : <CaretDown className="h-4 w-4" />}
-              </span>
-            </button>
-
-            {/* 可折叠内容 */}
-            <div
-              className={cn(
-                "grid transition-all duration-300 ease-in-out",
-                connectionExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-              )}
-            >
-              <div className="overflow-hidden">
-                <div className="px-4 pb-4 pt-1 space-y-4 text-sm">
-                  {/* Base URL */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <div className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                        <LinkSimple className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>{t('settings:vendor_panel.base_url')}</span>
-                      </div>
-                      <SaveIndicator status={baseUrlSaveStatus} />
-                    </div>
-                    <Input
-                      value={baseUrlDraft}
-                      onChange={(e) => setBaseUrlDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          (e.currentTarget as HTMLInputElement).blur();
-                        }
-                      }}
-                      onBlur={handleBaseUrlSave}
-                      placeholder="https://api.openai.com/v1"
-                      className="font-mono bg-muted/30 border-transparent focus:bg-muted/20 focus-visible:ring-0 focus-visible:ring-offset-0 transition-colors"
-                      disabled={vendorBusy}
-                    />
-                  </div>
-
-                  {/* API Key */}
-                  <div className="space-y-1.5">
-                    <div className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                      <Key className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>{t('settings:vendor_panel.api_key')}</span>
-                    </div>
-                    <div>
-                      {selectedVendorIsSiliconflow ? (
-                        <SiliconFlowSection
-                          variant="inline"
-                          onCreateConfig={handleSiliconFlowConfig}
-                          onBatchCreateConfigs={handleBatchCreateConfigs}
-                          onBatchConfigsCreated={handleBatchConfigsCreated}
-                          showMessage={showGlobalNotification}
-                          onApiKeySaved={(apiKey) => {
-                            triggerPostSaveAutoFlow?.({
-                              ...selectedVendor,
-                              apiKey,
-                            });
-                          }}
-                        />
-                      ) : selectedVendor.noApiKey ? (
-                        <div className="flex items-center gap-2 rounded-lg border border-border/40 px-4 py-3 text-sm text-muted-foreground">
-                          <Prohibit className="h-4 w-4 shrink-0" />
-                          <span>{t('settings:vendor_panel.no_api_key_hint', { defaultValue: '无需 API Key，保存后将自动获取模型列表' })}</span>
-                        </div>
+        {/* 连接配置摘要 — 点击打开 VendorConfigModal */}
+        <div className="rounded-lg border border-border/40 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => handleOpenVendorModal(selectedVendor)}
+            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-muted/30 transition-colors"
+          >
+            <div className="flex items-center gap-2 min-w-0 text-sm">
+              <LinkSimple className="h-4 w-4 text-muted-foreground shrink-0" aria-hidden="true" />
+              {(() => {
+                const hasUrl = !!(selectedVendor.baseUrl?.trim());
+                const hasKey = !!(selectedVendor.apiKey?.trim());
+                const configured = selectedVendor.noApiKey ? hasUrl : (hasUrl && hasKey);
+                if (configured) {
+                  return (
+                    <span className="flex items-center gap-2 min-w-0 text-muted-foreground">
+                      <Check className="h-3.5 w-3.5 text-green-500 shrink-0" />
+                      <span className="truncate font-mono text-xs">{selectedVendor.baseUrl}</span>
+                      <span className="text-muted-foreground/60 shrink-0">·</span>
+                      {selectedVendor.noApiKey ? (
+                        <span className="text-xs shrink-0 text-muted-foreground">
+                          {t('settings:vendor_panel.no_api_key_short', { defaultValue: '无 Key' })}
+                        </span>
                       ) : (
-                        <VendorApiKeySection
-                          key={selectedVendor.id}
-                          vendor={selectedVendor}
-                          onSave={(apiKey) => handleSaveVendorApiKey(selectedVendor.id, apiKey)}
-                          onClear={() => handleClearVendorApiKey(selectedVendor.id)}
-                          showMessage={showGlobalNotification}
-                          onApiKeySaved={(apiKey) => {
-                            triggerPostSaveAutoFlow?.({
-                              ...selectedVendor,
-                              apiKey,
-                            });
-                          }}
-                        />
+                        <span className="text-xs shrink-0">{t('settings:vendor_panel.api_key_configured_short', { defaultValue: 'Key ✓' })}</span>
                       )}
-                    </div>
-                  </div>
-
-                  {/* Notes */}
-                  {selectedVendor.notes && (
-                    <div className="space-y-1.5">
-                      <div className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                        <NotePencil className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>{t('settings:vendor_panel.notes')}</span>
-                      </div>
-                      <div className="text-sm text-foreground leading-relaxed">{selectedVendor.notes}</div>
-                    </div>
-                  )}
-                </div>
-              </div>
+                    </span>
+                  );
+                }
+                return (
+                  <span className="text-muted-foreground text-xs">
+                    {t('settings:vendor_panel.connection_not_configured', { defaultValue: '连接未配置' })}
+                  </span>
+                );
+              })()}
             </div>
-          </div>
-        )}
+            <PencilSimple className="h-4 w-4 text-muted-foreground shrink-0" />
+          </button>
+        </div>
       </div>
 
       {/* 模型管理区 */}
@@ -688,8 +488,15 @@ export const VendorDetailPanel: React.FC = () => {
       {/* 获取模型列表 Dialog */}
       {onAddVendorModels && supportsModelFetching(selectedVendor.providerType) && (
         <Dialog open={isModelFetcherDialogOpen} onOpenChange={setIsModelFetcherDialogOpen}>
-          <DialogContent className="w-full max-w-2xl p-0 overflow-hidden">
-            <DialogHeader className="px-5 pt-5 pb-4 border-b border-border/40">
+          <DialogContent className="w-full max-w-2xl p-0 overflow-hidden" zIndex={Z_INDEX.sheetModal}>
+            <DialogHeader className="relative px-5 pt-5 pb-4 border-b border-border/40">
+              <button
+                onClick={() => setIsModelFetcherDialogOpen(false)}
+                className="absolute right-4 top-4 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                aria-label="关闭"
+              >
+                <X size={18} weight="bold" />
+              </button>
               <DialogTitle>{t('settings:vendor_model_fetcher.dialog_title')}</DialogTitle>
               <DialogDescription>
                 {t('settings:vendor_model_fetcher.dialog_description', { vendor: selectedVendor.name || providerLabel })}

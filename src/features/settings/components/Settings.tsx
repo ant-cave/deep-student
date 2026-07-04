@@ -1537,6 +1537,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, mobilePresentation =
             setEditingVendor(null);
           }}
           onSave={handleSaveVendorModal}
+          embeddedMode={isMobileSheetPresentation}
         />
         <NotionAlertDialog
           open={Boolean(modelDeleteDialog)}
