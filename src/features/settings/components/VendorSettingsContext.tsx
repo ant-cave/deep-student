@@ -26,6 +26,7 @@ export interface VendorSettingsContextValue {
   profileCountByVendor: Map<string, number>;
   vendorBusy: boolean;
   vendorSaving: boolean;
+  vendorModalOpen: boolean;
   isEditingVendor: boolean;
   vendorFormData: Partial<VendorConfig>;
   setVendorFormData: React.Dispatch<React.SetStateAction<Partial<VendorConfig>>>;

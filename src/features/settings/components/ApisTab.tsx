@@ -30,6 +30,7 @@ interface ApisTabProps {
   profileCountByVendor: Map<string, number>;
   vendorBusy: boolean;
   vendorSaving: boolean;
+  vendorModalOpen: boolean;
   isEditingVendor: boolean;
   vendorFormData: Partial<VendorConfig>;
   setVendorFormData: React.Dispatch<React.SetStateAction<Partial<VendorConfig>>>;
@@ -78,6 +79,7 @@ export const ApisTab: React.FC<ApisTabProps> = (props) => {
     profileCountByVendor: props.profileCountByVendor,
     vendorBusy: props.vendorBusy,
     vendorSaving: props.vendorSaving,
+    vendorModalOpen: props.vendorModalOpen,
     isEditingVendor: props.isEditingVendor,
     vendorFormData: props.vendorFormData,
     setVendorFormData: props.setVendorFormData,

@@ -162,6 +162,7 @@ export const VendorSidebar: React.FC = () => {
         {...provided.draggableProps}
         {...provided.dragHandleProps}
         style={provided.draggableProps.style}
+        data-vendor-id={vendor.id}
         onClick={() => setSelectedVendorId(vendor.id)}
         className={cn(
           'px-3 py-2 text-left w-full flex items-center gap-2 cursor-grab active:cursor-grabbing group',

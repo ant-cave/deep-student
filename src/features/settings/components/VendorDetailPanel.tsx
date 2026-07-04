@@ -3,7 +3,7 @@
  * 从 ApisTab 拆分，负责渲染选中供应商的配置和模型列表
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowSquareOut, CaretDown, CaretUp, Check, DownloadSimple, LinkSimple, PencilSimple, Plus, Pulse, Spinner, Star, Trash, X } from '@phosphor-icons/react';
 import { NotionButton } from '@/components/ui/NotionButton';
@@ -80,6 +80,40 @@ const getProviderWebsiteUrl = (providerType?: string | null): string | null => {
   return map[providerType.toLowerCase()] || null;
 };
 
+/**
+ * rAF 缓动模拟平滑滚动。
+ * 解决 OverlayScrollbars 不响应原生 scrollTo({behavior:'smooth'}) 的问题。
+ * 返回 cancel 函数以便组件卸载/依赖变更时取消动画。
+ */
+const smoothScrollTo = (
+  el: HTMLElement,
+  target: number,
+  duration = 350,
+): (() => void) => {
+  const start = el.scrollTop;
+  const distance = target - start;
+  const startTime = performance.now();
+  let rafId = 0;
+  let cancelled = false;
+  const tick = (now: number) => {
+    if (cancelled) return;
+    const t = Math.min(1, (now - startTime) / duration);
+    // ease-out cubic
+    const eased = 1 - Math.pow(1 - t, 3);
+    el.scrollTop = start + distance * eased;
+    if (t < 1) {
+      rafId = requestAnimationFrame(tick);
+    } else {
+      el.scrollTop = target;
+    }
+  };
+  rafId = requestAnimationFrame(tick);
+  return () => {
+    cancelled = true;
+    if (rafId) cancelAnimationFrame(rafId);
+  };
+};
+
 // --- Component ---
 
 export const VendorDetailPanel: React.FC = () => {
@@ -89,6 +123,7 @@ export const VendorDetailPanel: React.FC = () => {
     selectedVendorModels,
     selectedVendorIsSiliconflow,
     vendorBusy,
+    vendorModalOpen,
     testingApi,
     handleOpenVendorModal,
     handleDeleteVendor,
@@ -111,6 +146,8 @@ export const VendorDetailPanel: React.FC = () => {
 
   const [collapsedFamilies, setCollapsedFamilies] = useState<Set<string>>(new Set());
   const [isModelFetcherDialogOpen, setIsModelFetcherDialogOpen] = useState(false);
+  const vendorHeaderRef = useRef<HTMLHeadingElement>(null);
+  const previousVendorModalOpenRef = useRef(vendorModalOpen);
 
   // 模型按家族分组（GPT-4 / Claude Opus / Gemini 2.5 …）
   const familyGroups = useMemo(
@@ -124,6 +161,40 @@ export const VendorDetailPanel: React.FC = () => {
   useEffect(() => {
     setCollapsedFamilies(new Set());
   }, [selectedVendor?.id]);
+
+  // 弹窗关闭后滚动到详情面板的大标题，让供应商名称进入视口
+  useEffect(() => {
+    const wasOpen = previousVendorModalOpenRef.current;
+    const isOpen = vendorModalOpen;
+    previousVendorModalOpenRef.current = isOpen;
+
+    if (wasOpen && !isOpen && vendorHeaderRef.current) {
+      let cancelScroll: (() => void) | null = null;
+      const timer = setTimeout(() => {
+        const el = vendorHeaderRef.current;
+        if (!el) return;
+        // 查找真正的滚动容器：OS viewport > iOS native > #settings-main-content
+        const mainContent = document.getElementById('settings-main-content');
+        const scrollContainer = (mainContent?.querySelector(
+          '[data-overlayscrollbars-viewport]',
+        ) as HTMLElement | null)
+          || (mainContent?.querySelector('.scroll-area--native') as HTMLElement | null)
+          || mainContent;
+        if (scrollContainer) {
+          const elRect = el.getBoundingClientRect();
+          const containerRect = scrollContainer.getBoundingClientRect();
+          const currentScroll = scrollContainer.scrollTop;
+          // offset: 让供应商名称与滚动容器顶部之间留出 16px 呼吸距离
+          const targetScroll = Math.max(0, currentScroll + elRect.top - containerRect.top - 16);
+          cancelScroll = smoothScrollTo(scrollContainer, targetScroll, 350);
+        }
+      }, 300);
+      return () => {
+        clearTimeout(timer);
+        cancelScroll?.();
+      };
+    }
+  }, [vendorModalOpen]);
 
   if (!selectedVendor) {
     return (
@@ -160,88 +231,84 @@ export const VendorDetailPanel: React.FC = () => {
       )}>
         {/* 卡片头部 */}
         <div className="p-3">
-          <div className="flex items-center gap-3">
-            <ProviderIcon modelId={api.model} size={20} showTooltip={false} />
-            <div className="flex-1 min-w-0 space-y-0.5">
+          {/* 第一行：图标 + 名称 + 开关 */}
+          <div className="flex items-center gap-2">
+            <ProviderIcon modelId={api.model} size={16} showTooltip={false} />
+            <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-foreground truncate">{profile.label || api.name}</span>
                 {!profile.enabled && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground whitespace-nowrap shrink-0">{t('settings:status.disabled')}</span>}
                 {isReadOnly && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary whitespace-nowrap shrink-0">{t('settings:api_config.badge_builtin_free')}</span>}
               </div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-mono text-xs text-muted-foreground truncate">{api.model}</span>
-                <ModelCapabilityIcons
-                  isMultimodal={profile.isMultimodal}
-                  isReasoning={profile.isReasoning}
-                  isEmbedding={profile.isEmbedding}
-                  isReranker={profile.isReranker}
-                  supportsTools={profile.supportsTools}
-                  size="xs"
-                />
-              </div>
             </div>
-
-            {/* 操作区域：次要操作 + 编辑 + 开关（开关在最右） */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              {/* 次要操作：hover 时显示 */}
-              <div className="flex items-center gap-0.5 opacity-0 group-hover/card:opacity-100 transition-opacity duration-150">
+            <Switch
+              checked={profile.enabled}
+              onCheckedChange={value => handleToggleModelProfile(profile, value)}
+              disabled={isReadOnly || vendorBusy}
+            />
+          </div>
+          {/* 第二行：模型ID + 能力图标 + 操作按钮 */}
+          <div className="flex items-center gap-1.5 mt-1.5 ml-[24px]">
+            <span className="font-mono text-xs text-muted-foreground truncate">{api.model}</span>
+            <ModelCapabilityIcons
+              isMultimodal={profile.isMultimodal}
+              isReasoning={profile.isReasoning}
+              isEmbedding={profile.isEmbedding}
+              isReranker={profile.isReranker}
+              supportsTools={profile.supportsTools}
+              size="xs"
+            />
+            <div className="flex-1" />
+            {/* 操作按钮 */}
+            <div className="flex items-center gap-0.5 shrink-0">
+              <NotionButton
+                size="sm"
+                variant="ghost"
+                iconOnly
+                className={cn("!h-7 !w-7", profile.isFavorite && "text-yellow-500")}
+                onClick={() => handleToggleFavorite(profile)}
+                disabled={vendorBusy}
+                title={t('settings:api_config.toggle_favorite')}
+              >
+                <Star className="h-3.5 w-3.5" weight={profile.isFavorite ? 'fill' : 'regular'} />
+              </NotionButton>
+              <NotionButton
+                size="sm"
+                variant="ghost"
+                iconOnly
+                className="!h-7 !w-7"
+                onClick={() => void testApiConnection(api)}
+                disabled={testingApi === api.id || vendorBusy}
+                title={t('settings:api_config.test_button')}
+              >
+                {testingApi === api.id ? <Spinner className="h-3.5 w-3.5 animate-spin" /> : <Pulse className="h-3.5 w-3.5" />}
+              </NotionButton>
+              {!isReadOnly ? (
                 <NotionButton
                   size="sm"
                   variant="ghost"
                   iconOnly
-                  className={cn(profile.isFavorite && "text-yellow-500 opacity-100")}
-                  onClick={() => handleToggleFavorite(profile)}
                   disabled={vendorBusy}
-                  title={t('settings:api_config.toggle_favorite')}
+                  title={t('common:actions.delete')}
+                  className="!h-7 !w-7 text-muted-foreground hover:text-destructive"
+                  onClick={() => handleDeleteModelProfile(profile)}
                 >
-                  <Star className="h-3.5 w-3.5" weight={profile.isFavorite ? 'fill' : 'regular'} />
+                  <Trash className="h-3.5 w-3.5" />
                 </NotionButton>
-                <NotionButton
-                  size="sm"
-                  variant="ghost"
-                  iconOnly
-                  onClick={() => void testApiConnection(api)}
-                  disabled={testingApi === api.id || vendorBusy}
-                  title={t('settings:api_config.test_button')}
-                >
-                  {testingApi === api.id ? <Spinner className="h-3.5 w-3.5 animate-spin" /> : <Pulse className="h-3.5 w-3.5" />}
-                </NotionButton>
-
-                {/* 删除：触发全局确认对话框 */}
-                {!isReadOnly ? (
-                  <NotionButton
-                    size="sm"
-                    variant="ghost"
-                    iconOnly
-                    disabled={vendorBusy}
-                    title={t('common:actions.delete')}
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() => handleDeleteModelProfile(profile)}
-                  >
-                    <Trash className="h-3.5 w-3.5" />
-                  </NotionButton>
-                ) : (
-                  /* 占位：保持对齐 */
-                  <div className="h-7 w-7 shrink-0" />
-                )}
-              </div>
-              {/* 编辑按钮 */}
+              ) : (
+                <div className="h-7 w-7 shrink-0" />
+              )}
               <NotionButton
                 size="sm"
                 variant={isEditing ? "default" : "ghost"}
                 iconOnly
+                className="!h-7 !w-7"
                 onClick={handleEditClick}
                 disabled={vendorBusy}
                 title={t('common:actions.edit')}
               >
                 <PencilSimple className="h-3.5 w-3.5" />
               </NotionButton>
-              {/* 开关：最右 */}
-              <Switch
-                checked={profile.enabled}
-                onCheckedChange={value => handleToggleModelProfile(profile, value)}
-                disabled={isReadOnly || vendorBusy}
-              />
             </div>
           </div>
         </div>
@@ -257,7 +324,7 @@ export const VendorDetailPanel: React.FC = () => {
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2 min-w-0">
               {selectedVendorIsSiliconflow && <SiliconFlowLogo className="h-5" />}
-              <h3 className="text-lg font-medium text-foreground truncate">
+              <h3 ref={vendorHeaderRef} className="text-lg font-medium text-foreground truncate">
                 {vendorDisplayName}
               </h3>
               {selectedVendorIsSiliconflow && (

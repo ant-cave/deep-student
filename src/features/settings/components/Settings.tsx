@@ -1016,6 +1016,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, mobilePresentation =
             profileCountByVendor={profileCountByVendor}
             vendorBusy={vendorBusy}
             vendorSaving={vendorSaving}
+            vendorModalOpen={vendorModalOpen}
             isEditingVendor={isEditingVendor}
             vendorFormData={vendorFormData}
             setVendorFormData={setVendorFormData}
