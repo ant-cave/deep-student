@@ -21,7 +21,6 @@
 //! ```
 
 mod config;
-#[cfg(not(target_os = "android"))]
 mod ftp;
 #[cfg(feature = "cloud_storage_s3")]
 mod s3;
