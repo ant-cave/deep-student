@@ -611,7 +611,7 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
                   size="sm"
                   onClick={() => {
                     setPendingSettingsTab('data-governance');
-                    window.dispatchEvent(new CustomEvent('settingsTabChange', { detail: 'data-governance' }));
+                    window.dispatchEvent(new CustomEvent('SETTINGS_NAVIGATE_TAB', { detail: { tab: 'data-governance' } }));
                   }}
                 >
                   {t('common:legal.dataRights.goToDataGovernance', '前往数据治理')}

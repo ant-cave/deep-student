@@ -137,7 +137,6 @@ export function NotionDialog({
     <ModalPortal open={open}>
       <motion.div
         data-overlay-container="true"
-        onPointerDown={(e) => e.stopPropagation()}
         className={cn(
           'pointer-events-auto fixed inset-0 flex',
           isMobileSheet ? 'items-end justify-center p-0' : 'items-center justify-center p-4 sm:p-6',
@@ -367,7 +366,6 @@ export function NotionAlertDialog({
     <ModalPortal open={open}>
       <motion.div
         data-overlay-container="true"
-        onPointerDown={(e) => e.stopPropagation()}
         className="pointer-events-auto fixed inset-0 flex items-center justify-center p-4"
         style={{ zIndex: Z_INDEX.modal }}
         initial="hidden"
@@ -391,6 +389,7 @@ export function NotionAlertDialog({
             borderColor: 'var(--dialog-shell-border)',
             boxShadow: 'var(--shadow-shell-floating)',
           }}
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
         >
           {/* 标题行 */}
