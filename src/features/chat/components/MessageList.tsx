@@ -234,10 +234,11 @@ const MessageListInner: React.FC<MessageListProps> = ({
     return () => cancelAnimationFrame(rafId);
   }, [useDirectRender, virtualizerReady, virtualRowCount, isStreaming, virtualizer]);
 
-  // 🔧 优化：使用 ref 追踪上一次消息数量和滚动状态
+  // 优化：使用 ref 追踪上一次消息数量和滚动状态
   const prevMessageCountRef = useRef(messageOrder.length);
   const isAutoScrollingRef = useRef(false);
   const rafIdRef = useRef<number | null>(null);
+  const smoothScrollRafRef = useRef<number | null>(null);
   const programmaticScrollLockRef = useRef(false);
   const programmaticScrollUnlockTimerRef = useRef<number | null>(null);
 
@@ -266,22 +267,52 @@ const MessageListInner: React.FC<MessageListProps> = ({
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     if (!viewportElement) return;
 
-    const top = viewportElement.scrollHeight;
-    const shouldLock = behavior === 'smooth';
+    const maxScroll = Math.max(0, viewportElement.scrollHeight - viewportElement.clientHeight);
+    if (Math.abs(viewportElement.scrollTop - maxScroll) < 1) return;
 
-    if (shouldLock) {
-      programmaticScrollLockRef.current = true;
+    if (behavior === 'auto') {
+      viewportElement.scrollTop = maxScroll;
+      return;
     }
 
-    if (typeof viewportElement.scrollTo === 'function') {
-      viewportElement.scrollTo({ top, behavior });
-    } else {
-      viewportElement.scrollTop = top;
+    // 手动实现平滑滚动：避免 OverlayScrollbars 对原生 scrollTo({ behavior: 'smooth' }) 支持不稳定
+    if (smoothScrollRafRef.current !== null) {
+      cancelAnimationFrame(smoothScrollRafRef.current);
+      smoothScrollRafRef.current = null;
     }
 
-    if (shouldLock) {
-      scheduleProgrammaticScrollUnlock(250);
-    }
+    programmaticScrollLockRef.current = true;
+    const start = viewportElement.scrollTop;
+    const distance = maxScroll - start;
+    const duration = 300;
+    let startTime = -1;
+
+    const animate = (currentTime: number) => {
+      if (!viewportElement) {
+        programmaticScrollLockRef.current = false;
+        smoothScrollRafRef.current = null;
+        return;
+      }
+
+      if (startTime < 0) {
+        startTime = currentTime;
+      }
+
+      const elapsed = currentTime - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = 1 - (1 - progress) * (1 - progress);
+      viewportElement.scrollTop = start + distance * eased;
+
+      if (progress < 1) {
+        smoothScrollRafRef.current = requestAnimationFrame(animate);
+      } else {
+        programmaticScrollLockRef.current = false;
+        smoothScrollRafRef.current = null;
+      }
+    };
+
+    smoothScrollRafRef.current = requestAnimationFrame(animate);
+    scheduleProgrammaticScrollUnlock(duration + 100);
   }, [scheduleProgrammaticScrollUnlock, viewportElement]);
 
   /** 点击"回到底部"按钮 */
@@ -316,6 +347,10 @@ const MessageListInner: React.FC<MessageListProps> = ({
     return () => {
       if (programmaticScrollUnlockTimerRef.current !== null) {
         window.clearTimeout(programmaticScrollUnlockTimerRef.current);
+      }
+      if (smoothScrollRafRef.current !== null) {
+        cancelAnimationFrame(smoothScrollRafRef.current);
+        smoothScrollRafRef.current = null;
       }
     };
   }, []);

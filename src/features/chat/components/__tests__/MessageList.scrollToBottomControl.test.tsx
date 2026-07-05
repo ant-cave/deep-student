@@ -180,8 +180,10 @@ describe('MessageList scroll-to-bottom control', () => {
     mockIsDataLoaded = true;
     latestViewport = null;
     vi.clearAllMocks();
+    let rafTime = 0;
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      callback(0);
+      rafTime += 300;
+      callback(rafTime);
       return 1;
     });
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
@@ -209,7 +211,7 @@ describe('MessageList scroll-to-bottom control', () => {
     renderMessageList();
 
     const viewport = requireViewport();
-    const { scrollTo, getScrollTop } = configureViewportMetrics(viewport, { scrollTop: 240 });
+    const { getScrollTop } = configureViewportMetrics(viewport, { scrollTop: 240 });
 
     fireEvent.scroll(viewport);
 
@@ -218,7 +220,6 @@ describe('MessageList scroll-to-bottom control', () => {
 
     fireEvent.click(button);
 
-    expect(scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: 'smooth' });
     expect(getScrollTop()).toBe(1000);
     expect(animatedContainer).toHaveAttribute('data-open', 'false');
     expect(animatedContainer).toHaveAttribute('aria-hidden', 'true');
