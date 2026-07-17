@@ -1,0 +1,633 @@
+name: Nightly Pre-release
+
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-pre-release
+  cancel-in-progress: false
+
+env:
+  GITHUB_REPO: ${{ github.repository }}
+  R2_BUCKET: deepstudent
+  KEEP_NIGHTLIES: 7
+
+jobs:
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # 检测当天提交 & 确定版本号
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  check-commits:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      version: ${{ steps.check.outputs.version }}
+      tag_name: ${{ steps.check.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: nightly
+          fetch-depth: 0
+
+      - name: Check today's commits & build version
+        id: check
+        run: |
+          TODAY=$(date -u +%Y%m%d)
+          SINCE="$(date -u +%Y-%m-%d)T00:00:00Z"
+          UNTIL="$(date -u +%Y-%m-%d)T23:59:59Z"
+
+          COUNT=$(git rev-list --count --since="${SINCE}" --until="${UNTIL}" HEAD 2>/dev/null || echo 0)
+          echo "Commits today: ${COUNT}"
+
+          if [[ "$COUNT" -eq 0 ]] && [[ "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "No commits today, skipping build"
+            exit 0
+          fi
+
+          PKG_VER=$(cat package.json | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
+          echo "PKG_VER=${PKG_VER}"
+
+          VER="${PKG_VER}-nightly.${TODAY}"
+          echo "version=${VER}" >> $GITHUB_OUTPUT
+          echo "tag_name=v${VER}" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "Nightly version: v${VER}"
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # macOS 构建
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  build-macos:
+    needs: [check-commits]
+    if: needs.check-commits.outputs.skip == 'false'
+    runs-on: macos-latest
+    env:
+      NODE_OPTIONS: '--max-old-space-size=4096'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: nightly
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Generate version info
+        run: node scripts/generate-version.mjs
+
+      - name: Prepare pdfium
+        run: |
+          if [[ -x "scripts/prepare-pdfium-macos.sh" ]]; then
+            bash scripts/prepare-pdfium-macos.sh "${{ matrix.target }}"
+          elif [[ -x "scripts/download-pdfium.sh" ]]; then
+            case "${{ matrix.target }}" in
+              aarch64-apple-darwin) bash scripts/download-pdfium.sh macos-arm64 ;;
+              x86_64-apple-darwin)  bash scripts/download-pdfium.sh macos-x64 ;;
+            esac
+          fi
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SILICONFLOW_BUILTIN_TEXT_KEY: ${{ secrets.SILICONFLOW_BUILTIN_TEXT_KEY }}
+          SILICONFLOW_BUILTIN_VISION_KEY: ${{ secrets.SILICONFLOW_BUILTIN_VISION_KEY }}
+          SILICONFLOW_BUILTIN_EMBED_KEY: ${{ secrets.SILICONFLOW_BUILTIN_EMBED_KEY }}
+        run: npx tauri build --target ${{ matrix.target }}
+
+      - name: Rename updater artifacts with arch suffix
+        run: |
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          ARCH=$(echo "${{ matrix.target }}" | cut -d'-' -f1)
+          for f in "$BUNDLE_DIR"/*.app.tar.gz; do
+            [ -f "$f" ] || continue
+            BASE=$(basename "$f" .app.tar.gz | tr ' ' '.')
+            mv "$f" "$BUNDLE_DIR/${BASE}_${ARCH}.app.tar.gz"
+            [ -f "$f.sig" ] && mv "$f.sig" "$BUNDLE_DIR/${BASE}_${ARCH}.app.tar.gz.sig"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-macos-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Windows 构建
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  build-windows:
+    needs: [check-commits]
+    if: needs.check-commits.outputs.skip == 'false'
+    runs-on: windows-latest
+    env:
+      NODE_OPTIONS: '--max-old-space-size=4096'
+    steps:
+      - uses: actions/checkout@v7
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.symlinks
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          ref: nightly
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Generate version info
+        run: node scripts/generate-version.mjs
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SILICONFLOW_BUILTIN_TEXT_KEY: ${{ secrets.SILICONFLOW_BUILTIN_TEXT_KEY }}
+          SILICONFLOW_BUILTIN_VISION_KEY: ${{ secrets.SILICONFLOW_BUILTIN_VISION_KEY }}
+          SILICONFLOW_BUILTIN_EMBED_KEY: ${{ secrets.SILICONFLOW_BUILTIN_EMBED_KEY }}
+        run: npx tauri build --target x86_64-pc-windows-msvc
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-windows-x86_64
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Linux 构建
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  build-linux:
+    needs: [check-commits]
+    if: needs.check-commits.outputs.skip == 'false'
+    runs-on: ubuntu-24.04
+    env:
+      NODE_OPTIONS: '--max-old-space-size=4096'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: nightly
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            rpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Generate version info
+        run: node scripts/generate-version.mjs
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SILICONFLOW_BUILTIN_TEXT_KEY: ${{ secrets.SILICONFLOW_BUILTIN_TEXT_KEY }}
+          SILICONFLOW_BUILTIN_VISION_KEY: ${{ secrets.SILICONFLOW_BUILTIN_VISION_KEY }}
+          SILICONFLOW_BUILTIN_EMBED_KEY: ${{ secrets.SILICONFLOW_BUILTIN_EMBED_KEY }}
+        run: npx tauri build --target x86_64-unknown-linux-gnu --bundles deb,rpm,appimage
+
+      - name: Rename updater artifacts with arch suffix
+        run: |
+          BUNDLE_DIR="src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage"
+          for f in "$BUNDLE_DIR"/*.AppImage.tar.gz; do
+            [ -f "$f" ] || continue
+            BASE=$(basename "$f" .AppImage.tar.gz | tr ' ' '.')
+            mv "$f" "$BUNDLE_DIR/${BASE}_x86_64.AppImage.tar.gz"
+            [ -f "$f.sig" ] && mv "$f.sig" "$BUNDLE_DIR/${BASE}_x86_64.AppImage.tar.gz.sig"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-linux-x86_64
+          path: |
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.tar.gz
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.tar.gz.sig
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Android 构建
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  build-android:
+    needs: [check-commits]
+    if: needs.check-commits.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: '--max-old-space-size=4096'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: nightly
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /usr/local/lib/android/sdk/ndk \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/graalvm \
+            /usr/local/lib/node_modules \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/Python \
+            /opt/hostedtoolcache/Ruby
+          sudo docker image prune --all --force
+
+      - name: Add swap space
+        run: |
+          SWAPFILE=/swapfile
+          if swapon --show --noheadings | grep -q .; then
+            echo "Swap already enabled"
+          else
+            if ! sudo fallocate -l 8G "$SWAPFILE"; then
+              sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=8192 status=progress
+            fi
+            sudo chmod 600 "$SWAPFILE"
+            sudo mkswap "$SWAPFILE"
+            sudo swapon "$SWAPFILE" || sudo rm -f "$SWAPFILE"
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK & NDK
+        run: |
+          yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;27.0.12077973" "build-tools;35.0.0" "platforms;android-35" | tail -3
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Generate version info
+        run: node scripts/generate-version.mjs
+
+      - name: Initialize Android project
+        run: npx tauri android init
+
+      - name: Prepare Android project (permissions / soft input / MainActivity)
+        run: |
+          MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+          test -f "$MANIFEST" || { echo "::error::AndroidManifest.xml not found"; exit 1; }
+          for PERMISSION in android.permission.RECORD_AUDIO android.permission.MODIFY_AUDIO_SETTINGS; do
+            PERM_LINE="<uses-permission android:name=\"$PERMISSION\" />"
+            if ! grep -qF "$PERMISSION" "$MANIFEST"; then
+              sed -i "/<manifest/a\\    $PERM_LINE" "$MANIFEST"
+            fi
+            grep -qF "$PERMISSION" "$MANIFEST" || { echo "::error::failed to inject $PERMISSION"; exit 1; }
+          done
+          if ! grep -qF 'android:windowSoftInputMode' "$MANIFEST"; then
+            sed -i 's|android:launchMode="singleTask"|android:launchMode="singleTask" android:windowSoftInputMode="adjustResize"|' "$MANIFEST"
+          fi
+          SRC="src-tauri/mobile/android/MainActivity.kt"
+          DST="src-tauri/gen/android/app/src/main/java/com/deepstudent/app/MainActivity.kt"
+          test -f "$SRC" || { echo "::error::MainActivity.kt missing at $SRC"; exit 1; }
+          cp "$SRC" "$DST"
+
+      - name: Copy custom Android icons
+        run: |
+          ICONS_SRC="src-tauri/icons/android"
+          RES_DST="src-tauri/gen/android/app/src/main/res"
+          if [ -d "$ICONS_SRC" ]; then
+            for density in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+              [ -d "$ICONS_SRC/$density" ] && cp -f "$ICONS_SRC/$density/"* "$RES_DST/$density/" 2>/dev/null || true
+            done
+            [ -d "$ICONS_SRC/mipmap-anydpi-v26" ] && cp -f "$ICONS_SRC/mipmap-anydpi-v26/"* "$RES_DST/mipmap-anydpi-v26/" 2>/dev/null || true
+            [ -f "$ICONS_SRC/values/ic_launcher_background.xml" ] && cp -f "$ICONS_SRC/values/ic_launcher_background.xml" "$RES_DST/values/" 2>/dev/null || true
+          fi
+
+      - name: Bundle pdfium for Android
+        run: |
+          JNILIBS_DIR="src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$JNILIBS_DIR"
+          if [ -f "src-tauri/resources/pdfium/libpdfium_android_arm64.so" ]; then
+            cp src-tauri/resources/pdfium/libpdfium_android_arm64.so "$JNILIBS_DIR/libpdfium.so"
+          else
+            bash scripts/download-pdfium.sh android-arm64
+            cp src-tauri/resources/pdfium/libpdfium_android_arm64.so "$JNILIBS_DIR/libpdfium.so"
+          fi
+
+      - name: Configure NDK toolchain
+        run: |
+          NDK_PREBUILT="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          sed -i '/\[target.aarch64-linux-android\]/,/^$/{ s|linker = .*|linker = "'"${NDK_PREBUILT}"'/bin/aarch64-linux-android21-clang"|; s|ar = .*|ar = "'"${NDK_PREBUILT}"'/bin/llvm-ar"| }' src-tauri/.cargo/config.toml
+          echo "CC_aarch64_linux_android=${NDK_PREBUILT}/bin/aarch64-linux-android21-clang" >> $GITHUB_ENV
+          echo "CXX_aarch64_linux_android=${NDK_PREBUILT}/bin/aarch64-linux-android21-clang++" >> $GITHUB_ENV
+          echo "AR_aarch64_linux_android=${NDK_PREBUILT}/bin/llvm-ar" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_PREBUILT}/bin/aarch64-linux-android21-clang" >> $GITHUB_ENV
+
+      - name: Build Android APK
+        env:
+          SILICONFLOW_BUILTIN_TEXT_KEY: ${{ secrets.SILICONFLOW_BUILTIN_TEXT_KEY }}
+          SILICONFLOW_BUILTIN_VISION_KEY: ${{ secrets.SILICONFLOW_BUILTIN_VISION_KEY }}
+          SILICONFLOW_BUILTIN_EMBED_KEY: ${{ secrets.SILICONFLOW_BUILTIN_EMBED_KEY }}
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=60s 120m npx tauri android build --target aarch64
+          status=$?
+          set -e
+          if [ "$status" -eq 124 ]; then
+            echo "::error::Android build timed out after 120 minutes"
+          elif [ "$status" -ne 0 ]; then
+            echo "::error::Android build failed with exit code ${status}"
+          fi
+          exit "$status"
+
+      - name: Sign APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "${ANDROID_KEYSTORE_BASE64}" | base64 -d > /tmp/release.keystore
+          UNSIGNED_APK=$(find src-tauri/gen/android -name "*-unsigned.apk" -type f | head -1)
+          if [ -z "$UNSIGNED_APK" ]; then
+            echo "::error::Unsigned APK not found"
+            exit 1
+          fi
+          BUILD_TOOLS=$(ls -d "${ANDROID_HOME}/build-tools/"* | sort -V | tail -1)
+          "${BUILD_TOOLS}/zipalign" -v 4 "$UNSIGNED_APK" /tmp/aligned.apk
+          "${BUILD_TOOLS}/apksigner" sign \
+            --ks /tmp/release.keystore \
+            --ks-key-alias "${ANDROID_KEY_ALIAS:-deepstudent}" \
+            --ks-pass "pass:${ANDROID_KEYSTORE_PASSWORD}" \
+            --key-pass "pass:${ANDROID_KEY_PASSWORD}" \
+            --in /tmp/aligned.apk \
+            --out /tmp/signed.apk
+          "${BUILD_TOOLS}/apksigner" verify --print-certs /tmp/signed.apk
+          mkdir -p android-output
+          cp /tmp/signed.apk "android-output/Deep.Student_nightly_arm64.apk"
+          rm -f /tmp/release.keystore
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-android-arm64
+          path: android-output/*.apk
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # 发布 prerelease
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  publish:
+    needs: [check-commits, build-macos, build-windows, build-linux, build-android]
+    if: |
+      always() &&
+      needs.check-commits.outputs.skip == 'false' &&
+      needs.build-macos.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      needs.build-linux.result == 'success' &&
+      !cancelled()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Display artifact structure
+        run: find artifacts -type f | head -50
+
+      - name: Collect release files
+        run: |
+          mkdir -p release-files
+          find artifacts -name "*.app.tar.gz" -exec cp {} release-files/ \;
+          find artifacts -name "*.app.tar.gz.sig" -exec cp {} release-files/ \;
+          find artifacts -name "*.dmg" -exec cp {} release-files/ \;
+          find artifacts -name "*.exe" -exec cp {} release-files/ \;
+          find artifacts -name "*.exe.sig" -exec cp {} release-files/ \;
+          find artifacts -name "*.AppImage" -exec cp {} release-files/ \;
+          find artifacts -name "*.AppImage.tar.gz" -exec cp {} release-files/ \;
+          find artifacts -name "*.AppImage.tar.gz.sig" -exec cp {} release-files/ \;
+          find artifacts -name "*.deb" -exec cp {} release-files/ \;
+          find artifacts -name "*.rpm" -exec cp {} release-files/ \;
+          find artifacts -name "*.apk" -exec cp {} release-files/ \;
+          echo "Release files:"
+          ls -lh release-files/
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.check-commits.outputs.tag_name }}"
+          VER="${{ needs.check-commits.outputs.version }}"
+          DATE=$(date -u +"%Y-%m-%d")
+
+          gh release create "${TAG}" \
+            --target nightly \
+            --title "Nightly ${VER} (${DATE})" \
+            --notes "Nightly pre-release build for ${DATE}." \
+            --prerelease
+
+          echo "✅ Created prerelease: ${TAG}"
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.check-commits.outputs.tag_name }}"
+          gh release upload "${TAG}" release-files/* --repo "${GITHUB_REPO}" --clobber
+          echo "✅ Assets uploaded to GitHub Release"
+
+      - name: Upload to Cloudflare R2
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          TAG="${{ needs.check-commits.outputs.tag_name }}"
+          MAX_RETRIES=3
+          RETRY_DELAY=3
+
+          upload_with_retry() {
+            local object_key="$1" file_path="$2" content_type="$3" cache_control="$4"
+            local attempt=1
+            while [ "$attempt" -le "$MAX_RETRIES" ]; do
+              if npx wrangler r2 object put "$object_key" \
+                --file "$file_path" --content-type "$content_type" \
+                --cache-control "$cache_control" --remote; then
+                return 0
+              fi
+              echo "  ⚠️ Attempt ${attempt}/${MAX_RETRIES} failed"
+              sleep "$RETRY_DELAY"
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
+
+          for FILE in release-files/*; do
+            NAME=$(basename "$FILE")
+            case "$NAME" in
+              *.sig)  CT="application/pgp-signature" ;;
+              *.dmg)  CT="application/x-apple-diskimage" ;;
+              *.deb)  CT="application/vnd.debian.binary-package" ;;
+              *.rpm)  CT="application/x-rpm" ;;
+              *.apk)  CT="application/vnd.android.package-archive" ;;
+              *)      CT="application/octet-stream" ;;
+            esac
+            upload_with_retry \
+              "${R2_BUCKET}/releases/${TAG}/${NAME}" \
+              "$FILE" "$CT" \
+              "public, max-age=31536000, immutable" || echo "::warning::Failed to upload ${NAME}"
+          done
+          echo "✅ R2 upload complete"
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # 清理旧 nightly（保留最近7个）
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  cleanup:
+    needs: [publish]
+    if: needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: nightly
+
+      - name: Cleanup old nightly releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "🧹 Checking for old nightly releases..."
+
+          NIGHTLY_TAGS=$(gh api repos/${GITHUB_REPO}/releases --paginate \
+            -q '.[] | select(.prerelease == true and (.tag_name | test("-nightly\\."))) | .tag_name' \
+            | sort -r || true)
+
+          TOTAL=$(echo "$NIGHTLY_TAGS" | grep -c . || true)
+          echo "Found ${TOTAL} nightly releases"
+
+          if [ "$TOTAL" -le "${{ env.KEEP_NIGHTLIES }}" ]; then
+            echo "✅ No cleanup needed (${TOTAL} ≤ ${{ env.KEEP_NIGHTLIES }})"
+            exit 0
+          fi
+
+          TO_DELETE=$(echo "$NIGHTLY_TAGS" | tail -n +$((KEEP_NIGHTLIES + 1)))
+          echo "$TO_DELETE" | while read -r OLD_TAG; do
+            [ -z "$OLD_TAG" ] && continue
+            echo "  Deleting: ${OLD_TAG}"
+
+            # 从 R2 删除
+            ASSETS=$(gh api "repos/${GITHUB_REPO}/releases/tags/${OLD_TAG}" \
+              -q '.assets[].name' 2>/dev/null || true)
+            echo "$ASSETS" | while read -r NAME; do
+              [ -z "$NAME" ] && continue
+              npx wrangler r2 object delete "${R2_BUCKET}/releases/${OLD_TAG}/${NAME}" --remote 2>/dev/null || true
+            done
+
+            # 删除 GitHub Release（会自动删除 tag）
+            gh release delete "${OLD_TAG}" --repo "${GITHUB_REPO}" -y || true
+            echo "  ✅ Deleted: ${OLD_TAG}"
+          done
+
+          echo "✅ Cleanup complete"
