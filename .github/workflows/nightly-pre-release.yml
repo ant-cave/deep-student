@@ -1,8 +1,6 @@
 name: Nightly Pre-release
 
 on:
-  schedule:
-    - cron: '0 20 * * *'
   workflow_dispatch:
 
 concurrency:
